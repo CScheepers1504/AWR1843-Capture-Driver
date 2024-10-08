@@ -1,0 +1,67 @@
+version: '3.3'
+
+services:
+
+  mmwave:
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: mmwave
+
+    # group_add:
+    #   - uucp
+    #   - dialout
+      # - i2c
+      # - gpio
+
+    privileged: true
+
+    devices:
+      - /dev/ttyACM0
+      - /dev/ttyACM1
+      - /dev/i2c-1
+
+    environment:
+      - DISPLAY=${DISPLAY}
+ 
+    volumes:
+      # give permission to access x11 display server
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ../src/:/home/ros2_ws/src/
+      # - ../build/:/home/ros2_ws/build/
+      # - ../install/:/home/ros2_ws/install/
+      # - ../log/:/home/ros2_ws/log/
+
+    stdin_open: true
+    tty: true
+
+    # network_mode: "host"
+    networks:
+      static_ip_network:
+        ipv4_address: 192.168.33.30 #static IP for container
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids: ['0']
+            capabilities: [gpu]
+
+    command: bash -c "source /opt/ros/humble/setup.bash && /bin/bash"
+
+# network to allow static ip in container
+networks:
+  static_ip_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.33.0/24
+
+
+
+
+
+    
