@@ -14,6 +14,11 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     curl \
     vim \
     libjsoncpp-dev \
+    iputils-ping \
+    nmap \
+    qtbase5-dev \
+    qtbase5-dev-tools \
+    python3-pyqt5 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install numpy \
@@ -21,6 +26,8 @@ RUN pip3 install numpy \
     && pip3 install matplotlib \
     && pip3 install h5py \
     && pip3 install pyserial
+
+#RUN pip3 install PyQt5
 
 RUN apt-get update && apt-get install --no-install-recommends -y \
     python3-colcon-common-extensions \
@@ -56,6 +63,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-imu-tools \
     ros-humble-sensor-msgs-py \
     && rm -rf /var/lib/apt/lists/*
+
+# expose port 22 to enable ssh connections from other devices
+EXPOSE 22
 
 RUN echo 'source /opt/ros/humble/setup.bash' >> ~/.bashrc
 RUN echo 'source /home/ros2_ws/install/setup.bash' >> ~/.bashrc

@@ -36,11 +36,14 @@ services:
 
     stdin_open: true
     tty: true
+     
+    #    ports:
+    #      - "2222:22"
 
-    # network_mode: "host"
-    networks:
-      static_ip_network:
-        ipv4_address: 192.168.33.30 #static IP for container
+    network_mode: "host"
+    #    networks:
+    #      static_ip_network:
+    #        ipv4_address: 192.168.33.30 #static IP for container
 
     deploy:
       resources:
@@ -53,12 +56,12 @@ services:
     command: bash -c "source /opt/ros/humble/setup.bash && /bin/bash"
 
 # network to allow static ip in container
-networks:
-  static_ip_network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 192.168.33.0/24
+#networks:
+#  static_ip_network:
+#    driver: bridge
+#    ipam:
+#      config:
+#        - subnet: 192.168.33.0/24
 
 
 

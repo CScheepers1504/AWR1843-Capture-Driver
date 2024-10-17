@@ -11,7 +11,7 @@ import os
 
 # Package Submodules
 # from .submodules.mmwave_config_class import mmWaveConfig
-from .mmwave_config_class import mmWaveConfig
+from mmwave_config_class import mmWaveConfig
 
 # ROS2 Imports
 import rclpy
@@ -99,6 +99,7 @@ class MMWaveControlNode(Node):
         ## Start Node
         # self.device = M2S2Device("RADAR")
         super().__init__("radar_node") 
+        self.get_logger().info("init")
 
         ## Setup Radar System Components -----------------------------------------------------------------------
         # set flags to defualt
@@ -119,13 +120,13 @@ class MMWaveControlNode(Node):
         runConfigPath = self.get_parameter('run_cfg_file_path').get_parameter_value().string_value
         devConfigPath = self.get_parameter('dev_cfg_file_path').get_parameter_value().string_value
 
-        self.declare_parameter('devName', 'radar')
+        self.declare_parameter('devNAME', 'radar')
         self.declare_parameter('devSERV', 'control_radar')
         self.declare_parameter('devSPUB', 'radar_status')
         self.declare_parameter('devDPUB', 'radar_data')
         self.declare_parameter('devLOGG', 'radar: ')
 
-        self.devName = self.get_parameter('devName').get_parameter_value().string_value
+        self.devNAME = self.get_parameter('devNAME').get_parameter_value().string_value
         self.devSERV = self.get_parameter('devSERV').get_parameter_value().string_value
         self.devSPUB = self.get_parameter('devSPUB').get_parameter_value().string_value
         self.devDPUB = self.get_parameter('devDPUB').get_parameter_value().string_value

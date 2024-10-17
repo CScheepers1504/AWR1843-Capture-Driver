@@ -4,7 +4,7 @@
    },
    "channelCfg": {
       "rxChannelEn": 15,
-      "txChannelEn": 7,
+      "txChannelEn": 3,
       "casMode": 0
    },
    "adcCfg": {

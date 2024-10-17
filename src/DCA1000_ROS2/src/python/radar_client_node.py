@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # importing required libraries
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
@@ -36,6 +37,7 @@ class MainWindow(QMainWindow):
  
     # constructor
     def __init__(self, *args, **kwargs):
+        print('start of constructor')
         global path
         super(MainWindow, self).__init__(*args, **kwargs)
  
@@ -130,6 +132,7 @@ class MainWindow(QMainWindow):
  
         # showing all the components
         self.show()
+        print('end of constructor')
 
     def setup_radar(self):
         response = node.send_request(self.cmdDICT["SETUP"])
@@ -233,6 +236,7 @@ class MMWaveClientNode(Node):
         ## Start Node
         # self.device = M2S2Device("RADAR")
         super().__init__("radar_client_node") 
+        self.get_logger().info("init")
         # super().__init__("Radar_client_node")
 
         package_name = 'dca1000_ros2_pkg'
@@ -243,23 +247,28 @@ class MMWaveClientNode(Node):
         self.devConfigPath = self.get_parameter('dev_cfg_file_path').get_parameter_value().string_value
         path = self.devConfigPath
 
-        self.declare_parameter('devName', 'radar')
+        self.declare_parameter('devNAME', 'radar')
         self.declare_parameter('devSERV', 'control_radar')
         self.declare_parameter('devSPUB', 'radar_status')
         self.declare_parameter('devDPUB', 'radar_data')
         self.declare_parameter('devLOGG', 'radar: ')
 
-        self.devName = self.get_parameter('devName').get_parameter_value().string_value
+        self.devNAME = self.get_parameter('devNAME').get_parameter_value().string_value
         self.devSERV = self.get_parameter('devSERV').get_parameter_value().string_value
         self.devSPUB = self.get_parameter('devSPUB').get_parameter_value().string_value
         self.devDPUB = self.get_parameter('devDPUB').get_parameter_value().string_value
         self.devLOGG = self.get_parameter('devLOGG').get_parameter_value().string_value
 
+        self.get_logger().info("loaded params")
+
         self.cli = self.create_client(SendDeviceControlCommand, self.devSERV)
+        self.get_logger().info("created client")
+
         #print("dca1000/" + self.device.devSERV)
         while not self.cli.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('service not available, waiting again...')
         self.req = SendDeviceControlCommand.Request()
+        self.get_logger().info("done init")
 
     def send_request(self, cmd):
         self.get_logger().info('Sending Request...')
@@ -270,6 +279,7 @@ class MMWaveClientNode(Node):
     
 
 def main(args=None):
+    print('client started', flush=True)
     global node
     global path
     rclpy.init()
@@ -289,6 +299,10 @@ def main(args=None):
     print("Shutting Down")
     rclpy.shutdown()
     ros2ExecThread.join()
+
+if __name__ == "__main__":
+    main()
+
 
 
 

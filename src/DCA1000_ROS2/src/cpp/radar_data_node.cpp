@@ -101,32 +101,33 @@ class MMWaveDataNode : public rclcpp::Node
 
           std::string package_name = "dca1000_ros2_pkg";
           std::string share_directory = ament_index_cpp::get_package_share_directory(package_name);
-          std::string run_cfg_file_path = share_directory + "config/cfgRun.json";
-          std::string dev_cfg_file_path = share_directory + "config/cfgDev.json"
+          std::string run_cfg_file_path = share_directory + "/config/cfgRun.json";
+          std::string dev_cfg_file_path = share_directory + "/config/cfgDev.json";
       
           // get jsons
           this->declare_parameter("run_cfg_file_path", run_cfg_file_path);
           this->declare_parameter("dev_cfg_file_path", dev_cfg_file_path);
 
           Json::Reader reader;
-
+          RCLCPP_INFO(this->get_logger(),"getting dev config at %s\n", dev_cfg_file_path.c_str());
           std::string devCfgPath =this->get_parameter("dev_cfg_file_path").get_parameter_value().get<std::string>();
           std::ifstream dev(devCfgPath);
           Json::Value devCfgData;
           reader.parse(dev, devCfgData);
 
+           RCLCPP_INFO(this->get_logger(),"getting run config at %s\n", run_cfg_file_path.c_str());
           std::string runCfgPath =this->get_parameter("run_cfg_file_path").get_parameter_value().get<std::string>();
           std::ifstream run(runCfgPath);
           Json::Value runCfgData;
           reader.parse(run, runCfgData);
 
-          this->declare_parameter<std::string>("devName", "radar");
+          this->declare_parameter<std::string>("devNAME", "radar");
           this->declare_parameter<std::string>("devSERV", "control_radar");
           this->declare_parameter<std::string>("devSPUB", "radar_status");
           this->declare_parameter<std::string>("devDPUB", "radar_data");
           this->declare_parameter<std::string>("devLOGG", "radar: ");
 
-          devName = this->get_parameter("devName").as_string();
+          devNAME = this->get_parameter("devNAME").as_string();
           devSERV = this->get_parameter("devSERV").as_string();
           devSPUB = this->get_parameter("devSPUB").as_string();
           devDPUB = this->get_parameter("devDPUB").as_string();
@@ -159,7 +160,7 @@ class MMWaveDataNode : public rclcpp::Node
 
         // Setup ROS2 Components ---------------------------------------------------------------
         RCLCPP_INFO(this->get_logger(),"PUBLISHER:");
-        data_publisher = this->create_publisher<radar_interfaces::msg::Frame>(devDPUB, 10);
+        data_publisher = this->create_publisher<dca1000_ros2_pkg::msg::Frame>(devDPUB, 10);
         RCLCPP_INFO(this->get_logger(),"Device publishder started.");
         RCLCPP_INFO(this->get_logger(),"Node Setup Finished.\n");
 
@@ -172,7 +173,7 @@ class MMWaveDataNode : public rclcpp::Node
 
   private:
 
-    std::string devName;
+    std::string devNAME;
     std::string devSERV;
     std::string devSPUB;
     std::string devDPUB;

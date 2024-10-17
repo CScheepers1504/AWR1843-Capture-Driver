@@ -8,7 +8,7 @@ from launch_ros.actions import Node
 # from m2s2_pydevclass.m2s2_device import M2S2Device
 
 # device = M2S2Device("RADAR")
-device_dev_name = "RADAR"
+# device_dev_name = "RADAR"
 
 def generate_launch_description():
 
@@ -17,21 +17,21 @@ def generate_launch_description():
     return LaunchDescription([
         Node(
             package='dca1000_ros2_pkg',
-            executable='radar_ctrl_node',
+            executable='radar_ctrl_node.py',
             name="radar_node",
-            parameters = [config]),
-
-        Node(
-            package='dca1000_ros2_pkg',
-            executable='radar_client_node',
-            name="radar_client_node",
-            parameters = [config]),
+            parameters = [config],
+            output='screen',
+            emulate_tty=True,
+            ),
 
         Node(
             package='dca1000_ros2_pkg',
             executable='radar_data',
             name="data_node",
-            parameters = [config]),
+            parameters = [config],
+            output='screen',
+            emulate_tty=True,
+            ),
 
         # Node(
         #     package='radar_gui_py_pkg',

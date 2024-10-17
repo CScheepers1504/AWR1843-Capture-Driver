@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # gui imports
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
