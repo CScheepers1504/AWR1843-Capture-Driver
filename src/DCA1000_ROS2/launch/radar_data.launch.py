@@ -20,7 +20,7 @@ def generate_launch_description():
             executable='radar_ctrl_node.py',
             name="radar_node",
             parameters = [config],      
-            emulate_tty=True
+            # emulate_tty=True
             ),
 
         Node(
@@ -28,7 +28,7 @@ def generate_launch_description():
             executable='radar_client_node.py',
             name="radar_client_node",
             parameters = [config],
-            emulate_tty=True, 
+            # emulate_tty=True, 
             output='screen'
             ),
 
@@ -37,7 +37,7 @@ def generate_launch_description():
             executable='radar_data',
             name="data_node",
             parameters = [config],
-            emulate_tty=True
+            # emulate_tty=True
             ),
 
         # Node(

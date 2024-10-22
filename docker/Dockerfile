@@ -25,7 +25,8 @@ RUN pip3 install numpy \
     && pip3 install scipy \
     && pip3 install matplotlib \
     && pip3 install h5py \
-    && pip3 install pyserial
+    && pip3 install pyserial \
+    && pip3 install pyqtgraph
 
 #RUN pip3 install PyQt5
 

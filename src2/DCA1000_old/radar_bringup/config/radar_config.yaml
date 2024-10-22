@@ -1,0 +1,4 @@
+/**:
+   ros__parameters:
+      run_cfg_file_path: '/home/ros2_ws2/src/DCA1000-ROS2/cfgRun.json'
+      dev_cfg_file_path: '/home/ros2_ws2/src/DCA1000-ROS2/cfgDev.json'

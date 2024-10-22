@@ -7,6 +7,7 @@ from PyQt5.QtCore import *
 from PyQt5.QtPrintSupport import *
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
+import os
 import sys
 
 # processing imports
@@ -15,11 +16,8 @@ from numpy import fft
 import threading
 import cv2 
 
-# M2S2 imports
-# from m2s2_pydevclass.m2s2_device import M2S2Device
-
 # Package Submodules
-from .submodules.mmwave_config_class import mmWaveConfig
+from mmwave_config_class import mmWaveConfig
 
 # ROS2 Imports
 import rclpy
@@ -27,8 +25,9 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 
+from ament_index_python.packages import get_package_share_directory
 # ROS2 Interface imports 
-from radar_interfaces.msg import Frame
+from dca1000_ros2_pkg.msg import Frame
 
 # global variables
 frame_data  = None # frame data
@@ -37,7 +36,7 @@ runPath     = None # runtime parameter path
 devPath     = None # device parameter path
 debugString = None # debug string sent to ROS2 out log
 
-device_d_pub = "radar_data"
+# device_d_pub = "radar_data"
 
 class ProcViewer(QMainWindow):
 
@@ -719,9 +718,6 @@ class MMWaveProcNode(Node):
     # %---------------------------------------------------------------------------------------------------------
     # Class Parameters
     # %---------------------------------------------------------------------------------------------------------
-    
-    # M2S2 Device Specification 
-    device = None
 
     # configs
     runDict = None # runtime parameter dictionary 
@@ -733,16 +729,33 @@ class MMWaveProcNode(Node):
     def __init__(self):
         global runPath
         global devPath
+ 
+        super().__init__("radar_display_node")    
 
-        ## Start Node
-        # self.device = M2S2Device("RADAR")
-        # super().__init__("%s_ard_node" % self.device.devNAME)     
-        super().__init__("radar_ard_node")    
+        package_name = 'dca1000_ros2_pkg'
+        share_directory = get_package_share_directory(package_name)
 
-        self.declare_parameter('run_cfg_file_path', '/home/orin/m2s2_ws/src/radar_ROS2_driver/cfgRun.json')
-        self.declare_parameter('dev_cfg_file_path', '/home/orin/m2s2_ws/src/radar_ROS2_driver/cfgDev.json')
-        self.runConfigPath = self.get_parameter('run_cfg_file_path').get_parameter_value().string_value
+        run_cfg_file_path = os.path.join(share_directory, 'config', 'cfgRun.json')
+        dev_cfg_file_path = os.path.join(share_directory, 'config', 'cfgDev.json')
+
+        self.declare_parameter('run_cfg_file_path', run_cfg_file_path)
+        self.declare_parameter('dev_cfg_file_path', dev_cfg_file_path)
+
+        self.runConfigPath = self.get_parameter('run_cfg_file_path').get_parameter_value().string_value       
         self.devConfigPath = self.get_parameter('dev_cfg_file_path').get_parameter_value().string_value
+        # path = self.devConfigPath
+
+        self.declare_parameter('devNAME', 'radar')
+        self.declare_parameter('devSERV', 'control_radar')
+        self.declare_parameter('devSPUB', 'radar_status')
+        self.declare_parameter('devDPUB', 'radar_data')
+        self.declare_parameter('devLOGG', 'radar: ')
+
+        self.devNAME = self.get_parameter('devNAME').get_parameter_value().string_value
+        self.devSERV = self.get_parameter('devSERV').get_parameter_value().string_value
+        self.devSPUB = self.get_parameter('devSPUB').get_parameter_value().string_value
+        self.devDPUB = self.get_parameter('devDPUB').get_parameter_value().string_value
+        self.devLOGG = self.get_parameter('devLOGG').get_parameter_value().string_value
 
         runPath = self.runConfigPath
         devPath = self.devConfigPath
@@ -750,7 +763,7 @@ class MMWaveProcNode(Node):
         ## Setup ROS2 Components -------------------------------------------------------------------------------
         self.cllgrpSUB = MutuallyExclusiveCallbackGroup()
         # self.FRMSUB = self.create_subscription(Frame, self.device.devDPUB, self.process_callback, 10, callback_group=self.cllgrpSUB) # , callback_group=self.cllgrpDPUBLSH
-        self.FRMSUB = self.create_subscription(Frame, device_d_pub, self.process_callback, 10, callback_group=self.cllgrpSUB)
+        self.FRMSUB = self.create_subscription(Frame, self.devDPUB, self.process_callback, 10, callback_group=self.cllgrpSUB)
         self.get_logger().info("RADAR_ard_node setup finihsed")
 
     def process_callback(self, frame):

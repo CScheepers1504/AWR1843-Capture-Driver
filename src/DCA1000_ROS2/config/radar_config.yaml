@@ -1,9 +1,7 @@
 /**:
    ros__parameters:
-      # specify custom paths for config files. If none are given, the ones in the share directory / config are used.
-      # run_cfg_file_path: '/home/mmwave/ssd/RRSG/ros2_ws/src/DCA1000-ROS2/cfgRun.json'
-      # dev_cfg_file_path: '/home/mmwave/ssd/RRSG/ros2_ws/src/DCA1000-ROS2/cfgDev.json'
-
+      run_cfg_file_path: '/home/ros2_ws/src/DCA1000_ROS2/config/awr1642_run.json'
+      dev_cfg_file_path: '/home/ros2_ws/src/DCA1000_ROS2/config/awr1642_dev.json'
       devNAME: radar
       devSERV: control_radar
       devSPUB: radar_status

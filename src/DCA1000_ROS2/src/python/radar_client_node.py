@@ -61,7 +61,7 @@ class MainWindow(QMainWindow):
         self.path = path
         if path:
             try:
-                with open(path, 'rU') as f:
+                with open(path, 'r') as f:
                     text = f.read()
             except Exception as e:
                 self.dialog_critical(str(e))
@@ -223,6 +223,12 @@ class MMWaveClientNode(Node):
     
     # M2S2 Device Specification 
     # device = None
+
+    cmdDICT = {
+        "SETUP":2,
+        "START":1,
+        "STOP":0
+    }
     
     devFLAGS_ = {
         'PWRON':False, 

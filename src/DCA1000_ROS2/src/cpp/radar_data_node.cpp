@@ -109,14 +109,16 @@ class MMWaveDataNode : public rclcpp::Node
           this->declare_parameter("dev_cfg_file_path", dev_cfg_file_path);
 
           Json::Reader reader;
-          RCLCPP_INFO(this->get_logger(),"getting dev config at %s\n", dev_cfg_file_path.c_str());
+          
           std::string devCfgPath =this->get_parameter("dev_cfg_file_path").get_parameter_value().get<std::string>();
+          RCLCPP_INFO(this->get_logger(),"getting dev config at %s\n", devCfgPath.c_str());
           std::ifstream dev(devCfgPath);
           Json::Value devCfgData;
           reader.parse(dev, devCfgData);
 
-           RCLCPP_INFO(this->get_logger(),"getting run config at %s\n", run_cfg_file_path.c_str());
+           
           std::string runCfgPath =this->get_parameter("run_cfg_file_path").get_parameter_value().get<std::string>();
+          RCLCPP_INFO(this->get_logger(),"getting run config at %s\n", runCfgPath.c_str());
           std::ifstream run(runCfgPath);
           Json::Value runCfgData;
           reader.parse(run, runCfgData);

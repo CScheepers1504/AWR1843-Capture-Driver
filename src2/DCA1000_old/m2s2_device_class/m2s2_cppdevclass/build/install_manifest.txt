@@ -1,0 +1,2 @@
+/usr/local/lib/libm2s2_cppdevclass.a
+/usr/local/include/M2S2Device.hpp
