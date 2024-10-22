@@ -30,7 +30,7 @@ services:
       # give permission to access x11 display server
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ../src/:/home/ros2_ws/src/
-      - ../src2/:/home/ros2_ws2/src/
+      # - ../src2/:/home/ros2_ws2/src/
       # - ../build/:/home/ros2_ws/build/
       # - ../install/:/home/ros2_ws/install/
       # - ../log/:/home/ros2_ws/log/
