@@ -6,6 +6,8 @@ import time
 import serial
 import os
 import json
+from collections.abc import Iterable
+from typing import Union
 
 # M2S2 imports
 # from m2s2_pydevclass.m2s2_device import M2S2Device
@@ -59,22 +61,7 @@ class MMWaveControlNode(Node):
         # commands sent over ethernet based on CLI. Consists of header, data size, command code, footer
         # commands above are listed in order of send and receive
         # some commands in the DCA1000 user guide are not used and are thus not included
-    
-    # dev_err_codes = { 
-    #     "-50"      : "Unknown command", 
-    #     "-51"      : "Invalid usage of command", 
-    #     "-52"      : "Invalid input parameter in command", 
-    #     "-53"      : "Sensor start reconfiguration not supported", 
-    #     "-54"      : "Sensor has already been started or stopped", 
-    #     "-55"      : "LVDS Software Session or HSI header not supported", 
-    #     "-56"      : "Application execution timeout", 
-    #     "-57"      : "Error in datapath configuration", 
-    #     "-58"      : "Command not supported while frame in progress", 
-    #     }  
-
-    # M2S2 Device Specification 
-    # device = None
-
+ 
     # Sockets and Ports
     dca_cmd_addr = ('192.168.33.180',4096)      # address to send commands to
     dca_rcv_addr = ('192.168.33.30', 4096)      # address to receive command responses from
@@ -82,7 +69,7 @@ class MMWaveControlNode(Node):
     dca_socket = None                           # socket variable for the command port
 
     # configs
-    runDict = None # runtime parameter dictionary 
+    # runDict = None # runtime parameter dictionary 
     devDict = None # device parameter dictionary
 
     # flags
@@ -112,19 +99,9 @@ class MMWaveControlNode(Node):
 
         package_name = 'dca1000_ros2_pkg'
         share_directory = get_package_share_directory(package_name)
-        run_cfg_file_path = os.path.join(share_directory, 'config', 'cfgRun.json')
         dev_cfg_file_path = os.path.join(share_directory, 'config', 'cfgDev.json')
 
-        # store file to config JSONs path in ROS2 parameters
-        self.declare_parameter('run_cfg_file_path', run_cfg_file_path)
         self.declare_parameter('dev_cfg_file_path', dev_cfg_file_path)
-
-        self.runConfigPath = self.get_parameter('run_cfg_file_path').get_parameter_value().string_value
-        self.devConfigPath = self.get_parameter('dev_cfg_file_path').get_parameter_value().string_value
-
-        self.get_logger().info("getting dev config at " + self.devConfigPath)
-
-
 
         self.declare_parameter('devNAME', 'radar')
         self.declare_parameter('devSERV', 'control_radar')
@@ -132,25 +109,19 @@ class MMWaveControlNode(Node):
         self.declare_parameter('devDPUB', 'radar_data')
         self.declare_parameter('devLOGG', 'radar: ')
 
+        self.declare_parameter('device_type', 'AWR1843')
+        self.declare_parameter('ser_addr', '/dev/ttyACM0')
+
+        self.devConfigPath = self.get_parameter('dev_cfg_file_path').get_parameter_value().string_value
+
         self.devNAME = self.get_parameter('devNAME').get_parameter_value().string_value
         self.devSERV = self.get_parameter('devSERV').get_parameter_value().string_value
         self.devSPUB = self.get_parameter('devSPUB').get_parameter_value().string_value
         self.devDPUB = self.get_parameter('devDPUB').get_parameter_value().string_value
         self.devLOGG = self.get_parameter('devLOGG').get_parameter_value().string_value
 
- # create mmWaveConfig Object and store parameter dicionaries
-        if os.path.exists(self.devConfigPath) and os.path.exists(self.runConfigPath):
-
-            self.get_logger().info("config files exist:" + self.devConfigPath + self.runConfigPath)
-
-            self.configs = mmWaveConfig(runtimeConfigPath=str(self.runConfigPath),mmwaveConfigPath=str(self.devConfigPath))
-            # self.configs = mmWaveConfig()
-            self.get_logger().info(str(type(self.configs)))
-            self.runDict = self.configs.runtimeParamDict
-            self.devDict = self.configs.mmwaveParamDict
-            self.get_logger().info(str(self.devDict))
-        else:
-             self.get_logger().error("configs do not exist!")
+        self.device_type = self.get_parameter('device_type').get_parameter_value().string_value
+        self.ser_addr = self.get_parameter('ser_addr').get_parameter_value().string_value
 
         # create socket for command port (all radar commands and responses sent and collected here)
         try:
@@ -185,47 +156,6 @@ class MMWaveControlNode(Node):
         err_code_path = os.path.join(share_directory, 'config', 'error_codes.json')
         with open(err_code_path, 'r') as json_file:
             self.dev_err_codes = json.load(json_file)
-
-        
-        # self.get_logger().info("Resetting System...")
-        # attempts = 0
-        # tcp_response = None
-        # while tcp_response == None:
-        #     # create socket for command port (all radar commands and responses sent and collected here)
-        #     try:
-        #         self.ser_socket = serial.Serial("/dev/ttyACM0",baudrate=921600, timeout=0.25)
-        #         # self.get_logger().info("Radar Command Port Opened Successfully") 
-        #     except Exception as e:
-        #         self.errDEV_ = True
-            
-        #     # start sensor
-        #     tcp_response = self.send_Request(self.dev_cpt_cmd[1]) #
-        #     attempts += 1
-        #     if attempts >= 5:
-        #         self.errDEV_ = True
-        #         break
-        #     self.ser_socket.close()
-
-
-        # time.sleep(5)
-
-        # attempts = 0
-        # tcp_response = None
-        # while tcp_response == None:
-        #     #stop sensor
-        #     tcp_response = self.send_Request(self.dev_cpt_cmd[0])
-        #     attempts += 1
-        #     if attempts >= 5:
-        #         self.errDEV_ = True
-        #         break
-        #     self.ser_socket.close()
-
-        # if self.errDEV_ is not True:
-        #     self.get_logger().info("System reset!")
-        #     self.ser_socket.close()
-
-        # else:
-        #     self.get_logger().error("Error: Please restart this program")
                   
     # Primary Functions
     # %---------------------------------------------------------------------------------------------------------
@@ -259,82 +189,31 @@ class MMWaveControlNode(Node):
                 self.get_logger().info("Received START Request from Client.")
                 self.dca_socket.sendto(self.dca_cfg_cmd['RECORD_START_CMD_CODE'], self.dca_cmd_addr)
                 self.response_DCA1000('RECORD_START_CMD_CODE')
-        
-                attempts = 0
-                tcp_response = None
-                while tcp_response == None:
-                    # create socket for command port (all radar commands and responses sent and collected here)
-                    try:
-                        self.ser_socket = serial.Serial("/dev/ttyACM0",baudrate=921600, timeout=0.25)
-                        # self.get_logger().info("Radar Command Port Opened Successfully") 
-                    except Exception as e:
-                        self.errDEV_ = True
-                        # self.get_logger().info("Radar Command Port Connection Failed With Exception: %s" % (str(e)))
-                    tcp_response = self.send_Request(self.dev_cpt_cmd[request.START])
-                    attempts += 1
-                    if attempts >= 5:
-                        self.errDEV_ = True
-                        break
-                    self.ser_socket.close()
-                if tcp_response == "Done" and not self.errDCA_:
+
+                if self.send_Request(self.dev_cpt_cmd[request.Start]):
+
                     self.devFLAGS_["RECRD"] = True
                     self.get_logger().info("Radar has started recording. Waiting for stop command.\n")
                     self.display_Status()
                     response.status = self.devFLAGS_["RECRD"]
                     return response
                 else:
-                    code_num = tcp_response.replace("Error ", "")
-                    code_num = code_num.replace("\r", "")
-                    # self.get_logger().error(self.dev_err_codes[code_num])
-                    if code_num in self.dev_err_codes:
-                        self.get_logger().error(self.dev_err_codes[code_num])
-                    else:
-                        self.get_logger().error("unknown error code")
-                    # for err in self.dev_err_codes:
-                    #     if err in tcp_response:
-                    #         self.get_logger().error(self.dev_err_codes[err])
+
+                    self.get_logger().error("Error setting up recording. Please restart the system")
                     self.errDEV_ = True
 
             elif (request.command == request.STOP):     
                 self.get_logger().info("Received STOP Request from Client.")   
 
-                # create socket for command port (all radar commands and responses sent and collected here)
-                try:
-                    self.ser_socket = serial.Serial("/dev/ttyACM0",baudrate=921600, timeout=0.25)
-                    # self.get_logger().info("Radar Command Port Opened Successfully") 
-                except Exception as e:
-                    self.errDEV_ = True
-                    # self.get_logger().info("Radar Command Port Connection Failed With Exception: %s" % (str(e)))
-                
-                attempts = 0
-                tcp_response = None
-                while tcp_response == None:
-                    tcp_response = self.send_Request(self.dev_cpt_cmd[request.STOP])
-                    attempts += 1
-                    if attempts >= 5:
-                        self.errDEV_ = True
-                        break
-                self.ser_socket.close()
-                
-                if tcp_response == "Done":
-                    self.devFLAGS_["RECRD"] = False
+                if self.send_Request(self.dev_cpt_cmd[request.STOP]):
+
                     self.dca_socket.sendto(self.dca_cfg_cmd['RECORD_STOP_CMD_CODE'], self.dca_cmd_addr)
                     self.response_DCA1000('RECORD_STOP_CMD_CODE')
+                    self.devFLAGS_["RECRD"] = False
                     self.get_logger().info("Radar has stopped recording. Ready for next record session.\n")
-                    self.display_Status() 
-                    response.status = True
-                    return response
+
                 else:
-                    code_num = tcp_response.replace("Error ", "")
-                    code_num = code_num.replace("\r", "")
-                    # self.get_logger().error(self.dev_err_codes[code_num])
-                    if code_num in self.dev_err_codes:
-                        self.get_logger().error(self.dev_err_codes[code_num])
-                    else:
-                        self.get_logger().error("unknown error code")
-                    # for err in self.dev_err_codes:
-                    #     if err in tcp_response:
-                    #         self.get_logger().error(self.dev_err_codes[err] + "\n")
+
                     self.errDEV_ = True
             
             self.display_Status()
@@ -391,8 +270,7 @@ class MMWaveControlNode(Node):
             self.get_logger().error("DCA1000 setup failed: One or more config commands failed.")
         else:
             self.cfgDCA_ = True
-    
-    # %---------------------------------------------------------------------------------------------------------    
+
     def setup_RADAR(self):
         """Performs setup of radar using a ROS2 service. 
     This ROS node was developed for use with the Nvidia Jetson Orin. The Orin has a driver
@@ -401,76 +279,14 @@ class MMWaveControlNode(Node):
     TCP service to send strings to the external computer (server).
     :raises AnyError: raises errors if setup commands failed
     """
-        if self.errDEV_:
-            self.get_logger().error("Radar Device setup failed: Server not available")
-            return
-
-        # Set up Radar Device
-        variant = self.runDict["VARIANT"]
-        self.get_logger().info("Starting %s Radar Device Setup." % (variant))
-
-        # update configs
-        # self.configs = mmWaveConfig(self.runConfigPath,self.devConfigPath)
-        # self.runDict = self.configs.runtimeParamDict
-        # self.devDict = self.configs.mmwaveParamDict
-
-        # create mmWaveConfig Object and store parameter dicionaries
-        if os.path.exists(self.devConfigPath) and os.path.exists(self.runConfigPath):
-
-            self.get_logger().info("config files exist:" + self.devConfigPath + self.runConfigPath)
-
-            self.configs = mmWaveConfig(runtimeConfigPath=str(self.runConfigPath),mmwaveConfigPath=str(self.devConfigPath))
-            self.get_logger().info(str(type(self.configs)))
-            self.runDict = self.configs.runtimeParamDict
-            self.devDict = self.configs.mmwaveParamDict
-            self.get_logger().info(str(type(self.devDict)))
-        else:
-             self.get_logger().error("configs do not exist!")
-
-        for cmdKey in list(self.devDict.keys()):
-
-            # create socket for command port (all radar commands and responses sent and collected here)
-            try:
-                self.ser_socket = serial.Serial("/dev/ttyACM0",baudrate=921600, timeout=0.25)
-                # self.get_logger().info("Radar Command Port Opened Successfully") 
-            except Exception as e:
-                self.errDEV_ = True
-                # self.get_logger().info("Radar Command Port Connection Failed With Exception: %s" % (str(e)))
-            
-            cmdString = self.configs.get_mmWaveCommandString(cmdKey)
-            attempts = 0
-            tcp_response = None
-            while tcp_response == None:
-                #self.get_logger().info("Sending %s" % (cmdString))
-                tcp_response = self.send_Request(cmdString)
-                attempts += 1
-                if attempts >= 5:
-                    self.errDEV_ = True
-                    break
-            self.ser_socket.close()
-
-            if tcp_response == "Done\r":
-                pass
-            else:
-                code_num = tcp_response.replace("Error ", "")
-                code_num = code_num.replace("\r", "")
-                # self.get_logger().error(self.dev_err_codes[code_num])
-                if code_num in self.dev_err_codes:
-                    self.get_logger().error(self.dev_err_codes[code_num])
-                else:
-                    self.get_logger().error("unknown error code")
-
-                # for err in self.dev_err_codes:
-                #     if err in tcp_response:
-                #         self.get_logger().error(self.dev_err_codes[str(err)])
-                #     self.errDEV_ = True
-            
-        if self.errDEV_:
-            self.get_logger().error("Radar Device setup failed: One or more config commands failed.")
-        else:
+        cmd_arr = self.get_cmd_arr(self.devConfigPath)
+        
+        if self.send_Request(cmd_arr):
             self.get_logger().info("Radar Device setup succeeded.\n") 
             self.cfgDEV_ = True
-
+        else:
+            self.get_logger().error("Radar Device setup failed: One or more config commands failed.")
+            
     # %---------------------------------------------------------------------------------------------------------
     def response_DCA1000(self, cmd):
         """ Helper function to listen for given command response from DCA1000. 
@@ -535,34 +351,82 @@ class MMWaveControlNode(Node):
 
         return status
 
-    # %---------------------------------------------------------------------------------------------------------
-    def send_Request(self, cmdString):
-        time.sleep(0.02)
-        # self.get_logger().info("Sending \"%s\"" % (cmdString.strip('\n')))
-        try:
-            for char in cmdString:
-                self.ser_socket.write(char.encode("utf-8"))
-        except Exception as e:
-            self.errDEV_ = True
-            self.get_logger().info("Connection failed with exception: %s" % (str(e)))  
-            tcp_response = "No connection."
+    def send_Request(self, cmd: Union[str, Iterable[str]] ) ->bool:
+        '''
+        This function sends a request or array of requests to the radar serial port.
+        The requests must be in the TI string format.
+        To work properly, both the device_type and ser_addr class variables must be set correctly.
+        
+        Returns:
+            boolean: True if the command succeeded, false if it failed.
+        '''
 
-        try:
-            tcp_response = self.response_SerialServer(cmdString.strip('\n'))
-        except Exception as e:
-            self.errDEV_ = True
-            self.get_logger().info("Response failed with exception: %s" % (str(e)))  
-            tcp_response = "Issue with response format."
+        if isinstance(cmd, str):
+            cmd = [cmd]
+
+        # elif not isinstance(cmd, Iterable[str]):
+        #     raise ValueError("please enter a valid type")
+
+        for command in cmd:
+
+            try:
+                self.ser_socket = serial.Serial(self.ser_addr ,baudrate=921600, timeout=0.25)
+                # self.get_logger().info("Radar Command Port Opened Successfully") 
+            except Exception as e:
+                self.get_logger().error("Radar Command Port Connection Failed With Exception: %s" % (str(e)))
+                return False
+            
+            time.sleep(0.02)
+            try:
+                self.ser_socket.write(command.encode("utf-8"))
+            except Exception as e:
+                self.get_logger().info("Connection failed with exception: %s" % (str(e)))  
+                return False
+
+            try:
+                tcp_response = self.response_SerialServer(command.strip('\n'))
+            except Exception as e:
+                self.get_logger().error("Response failed with exception: %s" % (str(e)))  
+                return False
+            self.ser_socket.close()
+
+            tcp_response = tcp_response.rstrip("\r\n")
+            if tcp_response == "Done":
+                pass
+            else:
+                code_num = tcp_response.replace("Error ", "")
+
+                if code_num in self.dev_err_codes:
+                    self.get_logger().error(self.dev_err_codes[code_num])
+                else:
+                    self.get_logger().error("unknown error code")
+
+                self.ser_socket.close()
+                return False
+            
         self.ser_socket.close()
+        return True
 
+    def get_cmd_arr(self, dev_cfg_path: str) -> Iterable[str]:
+        '''
+        reads in dev and run configs, returns array of command strings.
+        '''
+        
+        if not os.path.exists(dev_cfg_path):
+            raise FileNotFoundError("dev config file not found")
+        
+        cmd_list = []
 
-        if tcp_response == "Done":
-            pass
-            # self.get_logger().info('Received Status: %s \n' % (tcp_response))
-        else:
-            # self.get_logger().info('Received Status: %s' % (tcp_response))
-            self.errDEV_ = True
-        return tcp_response
+        config = mmWaveConfig(self.device_type, dev_cfg_path)
+
+        if config.mmwaveParamDict == None:
+            raise ValueError("Invalid dev config")
+
+        for cmd_key in list(config.mmwaveParamDict.keys()):
+            
+            cmd_list.append(config.get_mmWaveCommandString(cmd_key))
+
+        return cmd_list
 
     # %---------------------------------------------------------------------------------------------------------
     # END OF CLASS

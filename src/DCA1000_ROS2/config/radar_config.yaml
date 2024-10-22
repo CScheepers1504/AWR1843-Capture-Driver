@@ -1,6 +1,7 @@
 /**:
    ros__parameters:
-      run_cfg_file_path: '/home/ros2_ws/src/DCA1000_ROS2/config/awr1642_run.json'
+      device_type: AWR1642
+      ser_addr: '/dev/ttyACM0'
       dev_cfg_file_path: '/home/ros2_ws/src/DCA1000_ROS2/config/awr1642_dev.json'
       devNAME: radar
       devSERV: control_radar

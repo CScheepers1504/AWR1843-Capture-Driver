@@ -5,29 +5,10 @@ class mmWaveConfig():
     # %---------------------------------------------------------------------------------------------------------
     # Class Parameters
     # %---------------------------------------------------------------------------------------------------------
-    # Runtime dict stores parameters for how data and commands are sent to and received from device at runtime
-    # equivalent to mmwaveConfig.txt file in TI mmwave platforms tool box
-    runtimeParamDict = None
 
     # mmWave dict stores device parameters for configuration of waveform, adc and data port outputs etc. 
     # equivalent to profile_monitor_xwrXXXX.cfg files in TI mmwave platforms tool box
     mmwaveParamDict = None
-
-    runtimeList = ['VARIANT', 
-        'COMMAND_PORT', 
-        'FRAME_BUFFER_MLT',
-        'UDP_BUFFER_MLT',
-        'DCA_DATA_FORMAT_MODE', 
-        'DCA_LVDS_LANE_MODE',
-        'PROC_TYPE',
-        'PLOT_ORIENTATION',
-        'PLOT_SCALE_X',
-        'PLOT_SCALE_Y',
-        'CLUTTER_CONFIG',
-        'ARD_CONFIG',
-        'CFAR_CONFIG',
-        'AZM_CONFIG',
-        'ELV_CONFIG']
 
     # list of available config commands for mmwaveDevice used to check contents of json are correct
     # key is command, value is number of settings which is equal to len(settingsDict)
@@ -55,53 +36,6 @@ class mmWaveConfig():
                     'lowPower'          : 2, 
                     'lvdsStreamCfg'     : 4, 
                     'calibMonCfg'       : 2}
-
-    # list of available runtime config options used to check runtime file format correctness
-   
-    default_runtime_config = {
-        'VARIANT'               : "IWR6843",    # radar board type
-        'COMMAND_PORT'          : "COM4",       # UART command port designation
-        'FRAME_BUFFER_MLT'      : 3,            # Size of circular frame buffer class in no. of frames                             
-        'UDP_BUFFER_MLT'        : 3,            # Multiplies default UDP packet buffer size
-        'DCA_DATA_FORMAT_MODE'  : 3,            # 1: 12bit, 2: 14bit, 3:16bit
-        'DCA_LVDS_LANE_MODE'    : 2,            # 2: 2 Lane LVDS, 4: 4 Lane LVDS
-
-        "PROC_TYPE"         : "RANGE_DOPPLER",  # radar processing type [RANGE_DOPPLER, RANGE_AZIMUTH, RANGE_ELEVATION]  
-        "PLOT_ORIENTATION"  : "HORIZONTAL",     # transpose 2d plot. Just rotate 90deg ["HORIZONTAL, VERTICAL"]
-        "PLOT_SCALE_X"      : 1,                # Plot scale in the x dimension
-        "PLOT_SCALE_Y"      : 1,                # Plot scale in the Y dimension
-
-        "CLUTTER_CONFIG" : {
-            "NUM_FRAMES"     : 50
-        },
-
-        "ARD_CONFIG" : {
-            "RANGE_WINDOW_TYPE"     : "BLACKMAN", # Choose window type for range FFT
-            "DOPPLER_WINDOW_TYPE"   : "BLACKMAN", # Choose window type for doppler FFT
-            "RNG_PAD_FACTOR"        : 1,          # Multiplies the number of range FFT points to zero pad FFT 
-            "DOP_PAD_FACTOR"        : 1           # Multiplies the number of doppler FFT points to zero pad FFT 
-        },
-
-        "CFAR_CONFIG" : {
-            "RNG_GUARD_CELLS"       : 1,
-            "DOP_GUARD_CELLS"       : 2,
-            "RNG_TRAINING_CELLS"    : 1,
-            "DOP_TRAINING_CELLS"    : 2,
-            "PFA"                   : 10e-2,
-            "THRESHOLD"             : -8   
-        },
-
-        "AZM_CONFIG" : {
-            "FOV_PHYSICAL"  : 180,
-            "FOV_PROCESS"   : 100,
-            "FFT_POINTS"    : 256
-        },
-
-        "ELV_CONFIG" : {
-            "WINDOW_TYPE"   : "BLACKMAN",
-            "FFT_POINTS"    : 128           # Number of FFT points. Number of FFT points will be 12 + zero padding = FFT_POINTS
-        }
-    }
 
     default_mmwave_config = {
     'dfeDataOutputMode':
@@ -196,34 +130,25 @@ class mmWaveConfig():
     # Class Functions
     # %---------------------------------------------------------------------------------------------------------
     # Class Constructor
-    def __init__(self, runtimeConfigPath = None, mmwaveConfigPath = None):
+    def __init__(self, device_type: str, mmwaveConfigPath: str):
         """Initializes the config object which stores all required configuration parameters.
         
         Function either initializes configs to default values or loads files from json. All 
         configs are stored as dictionaries for easy access to values. 
-        Dictionaries are accessed by called mmWaveConfigObj.runtimeParamDict for runtime parameters and
-        mmWaveConfigObj.mmwaveParamDict for mmwave sensor parameters
-            
-        :param string runtimeConfigPath: the path to mmWaveRuntimeConfig.json  (Default = None, default configs will be loaded)
+
         :param string mmwaveConfigPath: the path to mmWaveDeviceConfig_XWRXXXX.json   (Default = None, default configs will be loaded)
         """
-        if runtimeConfigPath == None:
-            # default values stored in class (can use as a template for making your own JSONs)
-            self.runtimeParamDict = self.default_runtime_config
-        else:
-            # if path given, instead set runtimeDict to parsed json file
-            self.parse_runtimeConfigJSON(runtimeConfigPath)
 
         if mmwaveConfigPath == None:
             # default values stored in class (can use as a template for making your own JSONs)
             self.mmwaveParamDict = self.default_mmwave_config
         else:
             # if path given, instead set mmwaveDict to parsed json file
-            self.parse_mmWaveConfigJSON(mmwaveConfigPath, self.runtimeParamDict['VARIANT'])
+            self.parse_mmWaveConfigJSON(mmwaveConfigPath, device_type)
 
     # Primary Functions
     # %---------------------------------------------------------------------------------------------------------
-    def parse_mmWaveConfigJSON(self,filePath, radar_type):
+    def parse_mmWaveConfigJSON(self,filePath, device_type):
         """Loads an already written and correctly formatted json file into config object.
         
         File path given during initialization is used to load file. Function checks if file is correctly formatted 
@@ -237,11 +162,14 @@ class mmWaveConfig():
 
             error = False
 
-            if radar_type == "AWR1843":
+            if device_type == "AWR1843":
                 commandList = self.AWR1843_config_list
 
-            elif radar_type == "AWR1642":
+            elif device_type == "AWR1642":
                 commandList = self.AWR1642_config_list
+
+            else:
+                error = True
             
             if list(loadedDict.keys())==list(commandList.keys()): # check if correct commands present in file
                 for dictKey in loadedDict:
@@ -254,22 +182,6 @@ class mmWaveConfig():
                 self.mmwaveParamDict = None
             else:
                 self.mmwaveParamDict = loadedDict
-
-    # %---------------------------------------------------------------------------------------------------------
-    def parse_runtimeConfigJSON(self,filePath):
-        """Loads an already written and correctly formatted json file into config object.
-        
-        File path given during initialization is used to load file. Function checks if file is correctly formatted 
-        and states where errors in formatting occured. Function is very rigid on Json formatting and dictionary stored in
-        json needs to follow default dictionary format given in class constructor exactly. 
-        :params string filePath: filePath to json file to loaded into class.
-        """
-        with open(filePath) as json_file:
-            loadedDict = json.load(json_file)
-            if self.runtimeList == list(loadedDict.keys()):
-                self.runtimeParamDict = loadedDict
-            else:
-                self.runtimeParamDict = None
 
     # %---------------------------------------------------------------------------------------------------------
     def get_mmWaveCommandString(self, cmd):
