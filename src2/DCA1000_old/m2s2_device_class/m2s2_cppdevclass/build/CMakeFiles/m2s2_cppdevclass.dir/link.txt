@@ -1,2 +1,0 @@
-/usr/bin/ar qc libm2s2_cppdevclass.a CMakeFiles/m2s2_cppdevclass.dir/src/M2S2Device.cpp.o
-/usr/bin/ranlib libm2s2_cppdevclass.a
