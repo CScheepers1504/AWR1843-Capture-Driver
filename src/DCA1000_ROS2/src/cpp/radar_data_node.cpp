@@ -101,11 +101,8 @@ class MMWaveDataNode : public rclcpp::Node
 
           std::string package_name = "dca1000_ros2_pkg";
           std::string share_directory = ament_index_cpp::get_package_share_directory(package_name);
-          std::string run_cfg_file_path = share_directory + "/config/cfgRun.json";
           std::string dev_cfg_file_path = share_directory + "/config/cfgDev.json";
-      
-          // get jsons
-          this->declare_parameter("run_cfg_file_path", run_cfg_file_path);
+
           this->declare_parameter("dev_cfg_file_path", dev_cfg_file_path);
 
           Json::Reader reader;
@@ -115,13 +112,6 @@ class MMWaveDataNode : public rclcpp::Node
           std::ifstream dev(devCfgPath);
           Json::Value devCfgData;
           reader.parse(dev, devCfgData);
-
-           
-          std::string runCfgPath =this->get_parameter("run_cfg_file_path").get_parameter_value().get<std::string>();
-          RCLCPP_INFO(this->get_logger(),"getting run config at %s\n", runCfgPath.c_str());
-          std::ifstream run(runCfgPath);
-          Json::Value runCfgData;
-          reader.parse(run, runCfgData);
 
           this->declare_parameter<std::string>("devNAME", "radar");
           this->declare_parameter<std::string>("devSERV", "control_radar");
@@ -208,11 +198,6 @@ class MMWaveDataNode : public rclcpp::Node
             std::ifstream dev(devCfgPath);
             Json::Value devCfgData;
             reader.parse(dev, devCfgData);
-
-            std::string runCfgPath =this->get_parameter("run_cfg_file_path").get_parameter_value().get<std::string>();
-            std::ifstream run(runCfgPath);
-            Json::Value runCfgData;
-            reader.parse(run, runCfgData);
 
             // calculate parameters
             int numChirps = devCfgData["frameCfg"]["numChirps"].asInt();
