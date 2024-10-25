@@ -1,8 +1,0 @@
-msg/ControlStatus.idl
-msg/ControlStatus.msg
-msg/Frame.idl
-msg/Frame.msg
-srv/SendDeviceControlCommand.idl
-srv/SendDeviceControlCommand.srv
-srv/SendDeviceControlCommand_Request.msg
-srv/SendDeviceControlCommand_Response.msg

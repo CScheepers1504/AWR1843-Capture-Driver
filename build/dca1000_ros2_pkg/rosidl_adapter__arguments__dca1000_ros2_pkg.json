@@ -1,8 +1,0 @@
-{
-  "package_name": "dca1000_ros2_pkg",
-  "non_idl_tuples": [
-    "/home/mmwave/ssd/radar_odometry/ros2_ws/mmwave/src/DCA1000_ROS2:msg/Frame.msg",
-    "/home/mmwave/ssd/radar_odometry/ros2_ws/mmwave/src/DCA1000_ROS2:msg/ControlStatus.msg",
-    "/home/mmwave/ssd/radar_odometry/ros2_ws/mmwave/src/DCA1000_ROS2:srv/SendDeviceControlCommand.srv"
-  ]
-}
