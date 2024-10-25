@@ -1,0 +1,10 @@
+/**:
+   ros__parameters:
+      device_type: AWR1843
+      ser_addr: '/dev/ttyACM0'
+      dev_cfg_file_path: '/home/mmwave/ssd/radar_odometry/ros2_ws/mmwave/src/DCA1000_ROS2/config/awr1843_dev.json'
+      devNAME: radar
+      devSERV: control_radar
+      devSPUB: radar_status
+      devDPUB: radar_data
+      devLOGG: radar

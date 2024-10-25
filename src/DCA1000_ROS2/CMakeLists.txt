@@ -52,7 +52,7 @@ add_executable(radar_data
 
 #target_link_libraries(radar_data ringbuffer)
 
-ament_target_dependencies(radar_data rclcpp builtin_interfaces rosidl_default_runtime)
+ament_target_dependencies(radar_data rclcpp builtin_interfaces rosidl_default_runtime ament_index_cpp)
 
 target_link_libraries(radar_data ${JSONCPP_LIBRARIES})
 
@@ -78,8 +78,7 @@ install(TARGETS
 
 # Install Python executables (scripts)
 install(PROGRAMS
-  src/python/radar_client_node.py
-  src/python/radar_send.py
+  src/python/radar_cli_node.py
   src/python/radar_ctrl_node.py
   src/python/radar_proc_node.py
   src/python/mmwave_config_class.py

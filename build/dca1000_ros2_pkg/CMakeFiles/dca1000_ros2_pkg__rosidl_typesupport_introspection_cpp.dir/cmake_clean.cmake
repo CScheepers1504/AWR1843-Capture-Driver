@@ -1,0 +1,18 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/dca1000_ros2_pkg__rosidl_typesupport_introspection_cpp.dir/rosidl_typesupport_introspection_cpp/dca1000_ros2_pkg/msg/detail/control_status__type_support.cpp.o"
+  "CMakeFiles/dca1000_ros2_pkg__rosidl_typesupport_introspection_cpp.dir/rosidl_typesupport_introspection_cpp/dca1000_ros2_pkg/msg/detail/frame__type_support.cpp.o"
+  "CMakeFiles/dca1000_ros2_pkg__rosidl_typesupport_introspection_cpp.dir/rosidl_typesupport_introspection_cpp/dca1000_ros2_pkg/srv/detail/send_device_control_command__type_support.cpp.o"
+  "libdca1000_ros2_pkg__rosidl_typesupport_introspection_cpp.pdb"
+  "libdca1000_ros2_pkg__rosidl_typesupport_introspection_cpp.so"
+  "rosidl_typesupport_introspection_cpp/dca1000_ros2_pkg/msg/detail/control_status__rosidl_typesupport_introspection_cpp.hpp"
+  "rosidl_typesupport_introspection_cpp/dca1000_ros2_pkg/msg/detail/control_status__type_support.cpp"
+  "rosidl_typesupport_introspection_cpp/dca1000_ros2_pkg/msg/detail/frame__rosidl_typesupport_introspection_cpp.hpp"
+  "rosidl_typesupport_introspection_cpp/dca1000_ros2_pkg/msg/detail/frame__type_support.cpp"
+  "rosidl_typesupport_introspection_cpp/dca1000_ros2_pkg/srv/detail/send_device_control_command__rosidl_typesupport_introspection_cpp.hpp"
+  "rosidl_typesupport_introspection_cpp/dca1000_ros2_pkg/srv/detail/send_device_control_command__type_support.cpp"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/dca1000_ros2_pkg__rosidl_typesupport_introspection_cpp.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

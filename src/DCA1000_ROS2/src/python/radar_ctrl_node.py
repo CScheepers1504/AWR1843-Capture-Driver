@@ -6,8 +6,6 @@ import time
 import serial
 import os
 import json
-from collections.abc import Iterable
-from typing import Union
 
 # M2S2 imports
 # from m2s2_pydevclass.m2s2_device import M2S2Device
@@ -46,7 +44,8 @@ class MMWaveControlNode(Node):
     # useful commands
     dev_cpt_cmd = [ 
         'sensorStop\n',
-        'sensorStart\n'
+        'sensorStart\n',
+        'flushCfg\n'
         ] 
 
     dca_cfg_cmd = { 
@@ -190,7 +189,7 @@ class MMWaveControlNode(Node):
                 self.dca_socket.sendto(self.dca_cfg_cmd['RECORD_START_CMD_CODE'], self.dca_cmd_addr)
                 self.response_DCA1000('RECORD_START_CMD_CODE')
 
-                if self.send_Request(self.dev_cpt_cmd[request.Start]):
+                if self.send_Request(self.dev_cpt_cmd[request.START]):
 
                     self.devFLAGS_["RECRD"] = True
                     self.get_logger().info("Radar has started recording. Waiting for stop command.\n")
@@ -279,7 +278,12 @@ class MMWaveControlNode(Node):
     TCP service to send strings to the external computer (server).
     :raises AnyError: raises errors if setup commands failed
     """
+
+
         cmd_arr = self.get_cmd_arr(self.devConfigPath)
+
+        cmd_arr.insert(0, 'flushCfg\n')
+        # cmd_arr.insert(0, 'sensorStop\n')
         
         if self.send_Request(cmd_arr):
             self.get_logger().info("Radar Device setup succeeded.\n") 
@@ -351,7 +355,7 @@ class MMWaveControlNode(Node):
 
         return status
 
-    def send_Request(self, cmd: Union[str, Iterable[str]] ) ->bool:
+    def send_Request(self, cmd) ->bool:
         '''
         This function sends a request or array of requests to the radar serial port.
         The requests must be in the TI string format.
@@ -382,6 +386,8 @@ class MMWaveControlNode(Node):
             except Exception as e:
                 self.get_logger().info("Connection failed with exception: %s" % (str(e)))  
                 return False
+            
+            time.sleep(0.02)
 
             try:
                 tcp_response = self.response_SerialServer(command.strip('\n'))
@@ -407,7 +413,7 @@ class MMWaveControlNode(Node):
         self.ser_socket.close()
         return True
 
-    def get_cmd_arr(self, dev_cfg_path: str) -> Iterable[str]:
+    def get_cmd_arr(self, dev_cfg_path: str):
         '''
         reads in dev and run configs, returns array of command strings.
         '''

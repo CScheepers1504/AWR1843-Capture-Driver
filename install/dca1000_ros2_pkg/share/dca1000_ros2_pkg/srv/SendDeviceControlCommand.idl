@@ -1,0 +1,24 @@
+// generated from rosidl_adapter/resource/srv.idl.em
+// with input from dca1000_ros2_pkg/srv/SendDeviceControlCommand.srv
+// generated code does not contain a copyright notice
+
+
+module dca1000_ros2_pkg {
+  module srv {
+    module SendDeviceControlCommand_Request_Constants {
+      const int8 SETUP = 2;
+      const int8 START = 1;
+      const int8 STOP = 0;
+    };
+    struct SendDeviceControlCommand_Request {
+      int8 command;
+    };
+    module SendDeviceControlCommand_Response_Constants {
+      const boolean DONE = TRUE;
+      const boolean ERROR = FALSE;
+    };
+    struct SendDeviceControlCommand_Response {
+      boolean status;
+    };
+  };
+};
