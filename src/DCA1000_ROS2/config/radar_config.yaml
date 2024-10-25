@@ -8,3 +8,4 @@
       devSPUB: radar_status
       devDPUB: radar_data
       devLOGG: radar
+      use_gui: false

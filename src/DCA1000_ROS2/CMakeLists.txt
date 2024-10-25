@@ -78,7 +78,8 @@ install(TARGETS
 
 # Install Python executables (scripts)
 install(PROGRAMS
-  src/python/radar_cli_node.py
+  src/python/radar_gui_cli.py
+  src/python/radar_term_cli.py
   src/python/radar_ctrl_node.py
   src/python/radar_proc_node.py
   src/python/mmwave_config_class.py

@@ -23,9 +23,6 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallb
 
 from ament_index_python.packages import get_package_share_directory
 
-# ROS2 Interface imports 
-# from m2s2_interfaces.srv import SendDeviceControlCommand
-# from m2s2_interfaces.msg import ControlStatus
 from dca1000_ros2_pkg.msg import ControlStatus
 from dca1000_ros2_pkg.srv import SendDeviceControlCommand
 
