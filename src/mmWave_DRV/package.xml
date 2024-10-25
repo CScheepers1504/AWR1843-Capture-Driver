@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>dca1000_ros2_pkg</name>
+  <name>mmwave_drv</name>
   <version>0.0.0</version>
   <description>A ROS2 Driver for the DCA1000 board</description>
   <maintainer email="nicholasbowden0@gmail.com">nedwob</maintainer>
