@@ -27,7 +27,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallb
 
 from ament_index_python.packages import get_package_share_directory
 # ROS2 Interface imports 
-from dca1000_ros2_pkg.msg import Frame
+from mmwave_drv.msg import Frame
 
 # global variables
 frame_data  = None # frame data
@@ -732,7 +732,7 @@ class MMWaveProcNode(Node):
  
         super().__init__("radar_display_node")    
 
-        package_name = 'dca1000_ros2_pkg'
+        package_name = 'mmwave_drv'
         share_directory = get_package_share_directory(package_name)
 
         run_cfg_file_path = os.path.join(share_directory, 'config', 'cfgRun.json')

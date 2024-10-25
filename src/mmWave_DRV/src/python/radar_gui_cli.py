@@ -20,7 +20,7 @@ from ament_index_python.packages import get_package_share_directory
 
 # ROS2 Interface imports 
 # from m2s2_interfaces.srv import SendDeviceControlCommand
-from dca1000_ros2_pkg.srv import SendDeviceControlCommand
+from mmwave_drv.srv import SendDeviceControlCommand
 
 # global variables
 node = None
@@ -245,7 +245,7 @@ class MMWaveClientNode(Node):
         self.get_logger().info("init")
         # super().__init__("Radar_client_node")
 
-        package_name = 'dca1000_ros2_pkg'
+        package_name = 'mmwave_drv'
         share_directory = get_package_share_directory(package_name)
         dev_cfg_file_path = os.path.join(share_directory, 'config', 'cfgDev.json')
 

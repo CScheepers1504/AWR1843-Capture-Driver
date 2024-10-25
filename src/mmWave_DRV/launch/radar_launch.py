@@ -8,7 +8,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
 
-    config = os.path.join(get_package_share_directory('dca1000_ros2_pkg'), 'config', 'radar_config.yaml')
+    config = os.path.join(get_package_share_directory('mmwave_drv'), 'config', 'radar_config.yaml')
 
     with open(config, 'r') as f:
         config_params = yaml.safe_load(f)
@@ -17,13 +17,13 @@ def generate_launch_description():
     
     return LaunchDescription([
         Node(
-            package='dca1000_ros2_pkg',
+            package='mmwave_drv',
             executable='radar_ctrl_node.py',
             name="radar_control",
             parameters = [config],      
             ),
         Node(
-            package='dca1000_ros2_pkg',
+            package='mmwave_drv',
             executable='radar_gui_cli.py',
             name="radar_client",
             parameters = [config],
@@ -31,7 +31,7 @@ def generate_launch_description():
             condition= use_gui, 
             ),
         Node(
-            package='dca1000_ros2_pkg',
+            package='mwmave_drv',
             executable='radar_term_cli.py',
             name="radar_client",
             parameters = [config],
@@ -40,7 +40,7 @@ def generate_launch_description():
 
             ),
         Node(
-            package='dca1000_ros2_pkg',
+            package='mmwave_drv',
             executable='radar_data',
             name="radar_data",
             parameters = [config],

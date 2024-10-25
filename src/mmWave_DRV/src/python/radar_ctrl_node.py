@@ -23,8 +23,8 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallb
 
 from ament_index_python.packages import get_package_share_directory
 
-from dca1000_ros2_pkg.msg import ControlStatus
-from dca1000_ros2_pkg.srv import SendDeviceControlCommand
+from mmwave_drv.msg import ControlStatus
+from mmwave_drv.srv import SendDeviceControlCommand
 
 
 class MMWaveControlNode(Node):
@@ -93,7 +93,7 @@ class MMWaveControlNode(Node):
         self.errDEV_ = False
         self.cfgDEV_ = False
 
-        package_name = 'dca1000_ros2_pkg'
+        package_name = 'mmwave_drv'
         share_directory = get_package_share_directory(package_name)
         dev_cfg_file_path = os.path.join(share_directory, 'config', 'cfgDev.json')
 

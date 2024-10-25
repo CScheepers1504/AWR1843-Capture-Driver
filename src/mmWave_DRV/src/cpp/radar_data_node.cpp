@@ -25,8 +25,8 @@
    
 
 // Package Includes
-#include "dca1000_ros2_pkg/msg/frame.hpp"
-#include "dca1000_ros2_pkg/ringbuffer.hpp"
+#include "mmwave_drv/msg/frame.hpp"
+#include "mmwave_drv/ringbuffer.hpp"
 
 // Namespaces
 using namespace std::chrono_literals;
@@ -99,7 +99,7 @@ class MMWaveDataNode : public rclcpp::Node
         RCLCPP_INFO(this->get_logger(),"DEVICE CONFIG:");
         {
 
-          std::string package_name = "dca1000_ros2_pkg";
+          std::string package_name = "mmwave_drv";
           std::string share_directory = ament_index_cpp::get_package_share_directory(package_name);
           std::string dev_cfg_file_path = share_directory + "/config/cfgDev.json";
 
@@ -152,7 +152,7 @@ class MMWaveDataNode : public rclcpp::Node
 
         // Setup ROS2 Components ---------------------------------------------------------------
         RCLCPP_INFO(this->get_logger(),"PUBLISHER:");
-        data_publisher = this->create_publisher<dca1000_ros2_pkg::msg::Frame>(devDPUB, 10);
+        data_publisher = this->create_publisher<mmwave_drv::msg::Frame>(devDPUB, 10);
         RCLCPP_INFO(this->get_logger(),"Device publishder started.");
         RCLCPP_INFO(this->get_logger(),"Node Setup Finished.\n");
 
@@ -305,7 +305,7 @@ class MMWaveDataNode : public rclcpp::Node
     {
       collect_data();
       // auto message = radar_interfaces::msg::Frame();
-      auto message = dca1000_ros2_pkg::msg::Frame();
+      auto message = mmwave_drv::msg::Frame();
 
       if (bytesWritten >= frameSize){
         bufRead(dataToPublish,frameSize);
@@ -338,7 +338,7 @@ class MMWaveDataNode : public rclcpp::Node
     // ROS2
     rclcpp::TimerBase::SharedPtr timer_;
     // rclcpp::Publisher<radar_interfaces::msg::Frame>::SharedPtr data_publisher;
-    rclcpp::Publisher<dca1000_ros2_pkg::msg::Frame>::SharedPtr data_publisher;
+    rclcpp::Publisher<mmwave_drv::msg::Frame>::SharedPtr data_publisher;
 
     int count;
     const bool softwareTest = false;
