@@ -63,42 +63,13 @@ class MMWaveTermCli(Node):
         self.req = SendDeviceControlCommand.Request()
         self.get_logger().info("done init")
 
+        time.sleep(3)
 
-    def run(self):
+        self.setup_radar()
 
-        try:
-            time.sleep(2)
+        time.sleep(4)
 
-            if not self.radar_status['PWRON']:
-                self.get_logger().error('Radar is not powered on, please restart.')
-                return
-
-            self.get_logger().info("Setting up Radar")
-            self.setup_radar()
-            start_time = time.time()
-            while not self.radar_status["SETUP"]:
-                if time.time() - start_time > 10:
-                    self.get_logger().error('Radar took too long to start. Please review configs.')
-                    return
-                time.sleep(0.1)
-
-            self.get_logger().info("Start Publishing")
-            self.start_radar()
-            start_time = time.time()
-            while not self.radar_status["RECRD"]:
-                if time.time() - start_time > 10:
-                    self.get_logger().error('Radar took too long to start recording.')
-                    return
-                time.sleep(0.1)
-            self.get_logger().info("Radar successfully set up")
-
-            while True:
-                time.sleep(10)
-
-        except KeyboardInterrupt:
-
-            self.get_logger().info("Stopping radar")
-            self.stop_radar()
+        self.start_radar()
 
     def status_callback(self, msg):
 
@@ -126,14 +97,18 @@ class MMWaveTermCli(Node):
         print(response)
 
 def main(args=None):
-    print('client started')
 
+    rclpy.init()
     node = MMWaveTermCli()
-    node.run()
-    
-    print("Shutting Down")
-    rclpy.shutdown()
-
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    try:
+        executor.spin()
+        
+    except KeyboardInterrupt:
+        node.get_logger().info("Shutting down.\n")
+        node.destroy_node()
+    rclpy.shutdown() 
 
 if __name__ == "__main__":
     main()

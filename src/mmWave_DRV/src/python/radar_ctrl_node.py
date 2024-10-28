@@ -279,6 +279,9 @@ class MMWaveControlNode(Node):
 
         cmd_arr = self.get_cmd_arr(self.devConfigPath)
 
+        # empty string to remove initial mmwave prompt
+        # cmd_arr.insert(0, '\n')
+
         cmd_arr.insert(0, 'flushCfg\n')
         # cmd_arr.insert(0, 'sensorStop\n')
         
@@ -317,41 +320,6 @@ class MMWaveControlNode(Node):
             self.get_logger().error("Received Following Status: " + str(status) + "\n")
             self.errDCA_ = True
 
-    # %---------------------------------------------------------------------------------------------------------
-    def response_SerialServer(self, cmd):
-        """ Helper function to listen for given command response from Radar serial server being used. 
-        Will wait for command response. Can cause program to hang if acknowledgement packet is missed. 
-
-        :param string cmd: Name of the command sent to DCA1000 and waiting for response. 
-        """
-        received = False
-        timeoutCount = 0
-        status=""
-        while (not received) and (timeoutCount<=5):
-            try:
-                echo = self.ser_socket.read(len(cmd)+1)   # get the command echo
-                self.get_logger().warning(echo.decode().strip("\n"))
-                msg = self.ser_socket.readline()        # get the command status
-                self.get_logger().warning(msg.decode().strip("\n"))
-                banner = self.ser_socket.readline()     # get the banner
-                # self.get_logger().warning(banner.decode().strip("\n")4
-
-                received = True
-            except Exception as e:
-                msg = ""
-                self.get_logger().error(cmd + " Failed With Exception: " + str(e))
-                timeoutCount += 1
-        try:
-            status = msg.decode('utf-8','ignore')[:-1]
-        except:
-            if not len(msg) == 0:
-                status = "Received inconsisten message from server: " + msg.decode('utf-8')
-            else: 
-                status = "Nothing received from server."
-
-
-        return status
-
     def send_Request(self, cmd) ->bool:
         '''
         This function sends a request or array of requests to the radar serial port.
@@ -362,52 +330,70 @@ class MMWaveControlNode(Node):
             boolean: True if the command succeeded, false if it failed.
         '''
 
+        # turn string into list
         if isinstance(cmd, str):
             cmd = [cmd]
 
-        # elif not isinstance(cmd, Iterable[str]):
-        #     raise ValueError("please enter a valid type")
+        # open serial port
+        try:
+            self.ser = serial.Serial(self.ser_addr ,baudrate=921600, timeout=0.25)
+
+        except Exception as e:
+            self.get_logger().error("Radar Command Port Connection Failed With Exception: %s" % (str(e)))
+            return False
+        time.sleep(0.02)
+
+        # send empty command to clear all previous content
+        try:
+            self.ser.write("\n".encode("utf-8"))
+            time.sleep(0.02)
+            init_str = self.ser.read_all()
+
+        except Exception as e:
+            self.get_logger().error("Connection failed with exception: %s" % (str(e)))  
+            self.ser.close()
+            return False
 
         for command in cmd:
 
             try:
-                self.ser_socket = serial.Serial(self.ser_addr ,baudrate=921600, timeout=0.25)
-                # self.get_logger().info("Radar Command Port Opened Successfully") 
-            except Exception as e:
-                self.get_logger().error("Radar Command Port Connection Failed With Exception: %s" % (str(e)))
-                return False
-            
-            time.sleep(0.02)
-            try:
-                self.ser_socket.write(command.encode("utf-8"))
+                self.ser.write(command.encode("utf-8"))
+                
+                echo_raw = self.ser.readline()
+                response_raw = self.ser.readline()
+                banner_raw = self.ser.readline()
+
+                if (len(echo_raw) == 0) or (len(response_raw) == 0):
+                    self.get_logger().error("Received invalid response. Please restart.")
+                    self.ser.close()
+                    return False
+                
+                echo = echo_raw.decode('utf-8').strip()
+                response = response_raw.decode('utf-8').strip()
+                
+                self.get_logger().info(echo)
+                self.get_logger().info(response)
+                # self.get_logger().info(banner_raw.decode('utf-8'))
+
             except Exception as e:
                 self.get_logger().info("Connection failed with exception: %s" % (str(e)))  
+                self.ser.close()
                 return False
-            
-            time.sleep(0.02)
 
-            try:
-                tcp_response = self.response_SerialServer(command.strip('\n'))
-            except Exception as e:
-                self.get_logger().error("Response failed with exception: %s" % (str(e)))  
-                return False
-            self.ser_socket.close()
-
-            tcp_response = tcp_response.rstrip("\r\n")
-            if tcp_response == "Done":
+            if response == "Done":
                 pass
             else:
-                code_num = tcp_response.replace("Error ", "")
+                code_num = response.replace("Error ", "")
 
                 if code_num in self.dev_err_codes:
                     self.get_logger().error(self.dev_err_codes[code_num])
                 else:
                     self.get_logger().error("unknown error code")
 
-                self.ser_socket.close()
+                self.ser.close()
                 return False
             
-        self.ser_socket.close()
+        self.ser.close()
         return True
 
     def get_cmd_arr(self, dev_cfg_path: str):
@@ -446,6 +432,12 @@ def main(args=None):
         #rclpy.spin(node)
     except KeyboardInterrupt:
         node.get_logger().info("Shutting down.\n")
+        # stop radar
+        node.send_Request(node.dev_cpt_cmd[0])
+        # stop dca
+        node.dca_socket.sendto(node.dca_cfg_cmd['RECORD_STOP_CMD_CODE'], node.dca_cmd_addr)
+        node.response_DCA1000('RECORD_STOP_CMD_CODE')
+
         node.destroy_node()
     rclpy.shutdown()
 
