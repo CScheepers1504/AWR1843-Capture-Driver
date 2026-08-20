@@ -21,7 +21,7 @@
    "profileCfg": {
       "profileId"        : 0, 
       "startFreq"        : 77,        
-      "idleTime"         : 4,         
+      "idleTime"         : 8,         
       "adcStartTime"     : 6.4,         
       "rampEndTime"      : 64.73,        
       "txOutPower"       : 0,         
@@ -59,13 +59,13 @@
       "chirpEndIndex": 1,
       "numChirps": 27,
       "numFrames": 0,
-      "framePeriod": 100,
+      "framePeriod": 500,
       "triggerSelect": 1,
       "frameTriggerDelay": 0
    },
    "lowPower": {
       "dontCare": 0,
-      "adcMode": 0
+      "adcMode": 1
    },
    "lvdsStreamCfg": {
       "subFrameIdx ": -1,
