@@ -2,3 +2,4 @@ build/
 install/
 log/
 logs/
+.vscode/sftp.json
