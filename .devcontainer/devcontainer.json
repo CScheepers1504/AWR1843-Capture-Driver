@@ -1,7 +1,0 @@
-{
-    "name": "mmwave",
-    "dockerComposeFile": ["../docker/docker-compose.yml"],
-    "service": "mmwave",
-    "workspaceFolder": "/home/ros2_ws",       // Container's working directory
-    "shutdownAction": "stopCompose"      // Stop the container when VS Code is closed
-  }
