@@ -28,7 +28,7 @@
       "txPhaseShifter": 0,
       "freqSlopeConst": 90,
       "txStartTime": 1,
-      "numAdcSamples": 128,
+      "numAdcSamples": 64,
       "digOutSampleRate": 6250,
       "hpfCornerFreq1": 0,
       "hpfCornerFreq2": 0,
@@ -67,9 +67,9 @@
    "frameCfg": {
       "chirpStartIndex": 0,
       "chirpEndIndex": 2,
-      "numChirps": 41,
-      "numFrames": 1000,
-      "framePeriod": 50,
+      "numChirps": 8,
+      "numFrames": 0,
+      "framePeriod": 3,
       "triggerSelect": 1,
       "frameTriggerDelay": 0
    },

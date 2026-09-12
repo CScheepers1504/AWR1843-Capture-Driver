@@ -2,7 +2,7 @@
    ros__parameters:
       device_type: AWR1843
       ser_addr: '/dev/ttyACM0'
-      dev_cfg_file_path: '/home/mmwave/ssd/chris-launch-monitor/src/mmWave_DRV/config/awr1843_launchmonitor.json'
+      dev_cfg_file_path: '/home/mmwave/ssd/chris-launch-monitor/src/mmWave_DRV/config/awr1843_wideband_lowfs.json'
       devNAME: radar
       devSERV: control_radar
       devSPUB: radar_status
