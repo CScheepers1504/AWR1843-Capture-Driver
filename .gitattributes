@@ -1,0 +1,11 @@
+# The laptop is Windows, the Jetson is Linux. A CRLF shell script fails on the
+# Jetson with an unhelpful "$'\r': command not found", so force LF on everything
+# that gets executed remotely.
+* text=auto eol=lf
+*.sh   text eol=lf
+*.py   text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.msg  text eol=lf
+*.srv  text eol=lf
+*.pyc  binary
