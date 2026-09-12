@@ -20,6 +20,7 @@ from datetime import datetime
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 try:
     from mmwave_drv.msg import Frame
@@ -69,11 +70,24 @@ class Recorder(Node):
         self.offset = 0
         self.count = 0
         self.size_mismatch = 0
+        self.first_seq = None
         self.last_seq = None
         self.gaps = 0
+        self.missed = 0
+        self.seq_unparsed = 0
+        self.payload_kind = None
         self.t0 = None
 
-        self.sub = self.create_subscription(Frame, "radar_data", self.on_frame, 50)
+        # Must match the publisher QoS in radar_data_node.cpp. Both sides were
+        # default-reliable, which throttled the whole chain to the speed of this
+        # Python callback and hid the shortfall (no sequence gaps, just a lower
+        # frame rate). Best-effort surfaces any shortfall as gaps instead.
+        qos = QoSProfile(
+            depth=100,
+            history=HistoryPolicy.KEEP_LAST,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
+        self.sub = self.create_subscription(Frame, "radar_data", self.on_frame, qos)
         self.get_logger().info(
             "Recording to %s (expecting %d B/frame)" % (session_dir, dims["frame_bytes"])
         )
@@ -83,13 +97,26 @@ class Recorder(Node):
         if self.t0 is None:
             self.t0 = now
 
+        # Which branch runs here is the whole ballgame. Frame.msg declares
+        # uint8[], which rclpy deserialises as a numpy array -- one memcpy. It
+        # was byte[] (an IDL octet sequence), which is excluded from the numpy
+        # fast path and arrives as ~24k single-byte objects to be joined, at
+        # roughly 5-6 ms/frame on this Xavier NX. That capped the recorder at
+        # 169.5 Hz against a publisher running a rock-steady 333.33 Hz.
+        # The branch taken is logged once so a silent regression is visible.
         fd = msg.frame_data
         if isinstance(fd, (bytes, bytearray)):
             data = bytes(fd)
+            kind = "bytes"
         elif hasattr(fd, "tobytes"):        # numpy array or array.array
             data = fd.tobytes()
+            kind = "numpy/array (fast)"
         else:                                # list of length-1 bytes objects
             data = b"".join(fd)
+            kind = "python list (SLOW -- is Frame.msg still byte[]?)"
+        if self.payload_kind is None:
+            self.payload_kind = kind
+            self.get_logger().info("frame_data arrives as: %s" % kind)
         n = len(data)
 
         if n != self.dims["frame_bytes"]:
@@ -101,15 +128,34 @@ class Recorder(Node):
                     % (n, self.dims["frame_bytes"])
                 )
 
-        # header.frame_id carries the driver's incrementing counter
+        # header.frame_id carries the driver's incrementing counter.
+        #
+        # The old fallback here was `seq = self.count` on a parse failure, which
+        # is the recorder's OWN callback counter: it increments by exactly 1
+        # every callback, so gap detection silently degraded into "count my own
+        # callbacks" and could never report a gap. Capture 2026-08-26_17-09-53
+        # reported sequence_gaps=0 while dropping 2416 of 4916 published frames.
+        # A parse failure is now counted and reported, never papered over.
         try:
             seq = int(msg.header.frame_id)
         except (TypeError, ValueError):
-            seq = self.count
-        if self.last_seq is not None and seq != self.last_seq + 1:
-            self.gaps += 1
-            self.get_logger().warn("Sequence gap: %s -> %s" % (self.last_seq, seq))
-        self.last_seq = seq
+            self.seq_unparsed += 1
+            if self.seq_unparsed == 1:
+                self.get_logger().error(
+                    "header.frame_id %r is not an integer -- LOSS DETECTION IS "
+                    "DISABLED for this capture." % (msg.header.frame_id,)
+                )
+            seq = None
+
+        if seq is not None:
+            if self.last_seq is None:
+                self.first_seq = seq
+            elif seq != self.last_seq + 1:
+                self.gaps += 1
+                self.missed += seq - self.last_seq - 1
+                if self.gaps <= 10:
+                    self.get_logger().warn("Sequence gap: %s -> %s" % (self.last_seq, seq))
+            self.last_seq = seq
 
         stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
         self.bin_f.write(data)
@@ -133,12 +179,25 @@ class Recorder(Node):
         self.idx_f.close()
         elapsed = (time.time() - self.t0) if self.t0 else 0
         rate = self.count / elapsed if elapsed > 0 else 0
+        # seq_span is the publisher's own frame count over the same window, so
+        # frames/seq_span is the fraction actually captured. Without it a slow
+        # subscriber looks identical to a slow radar -- which is exactly how the
+        # publisher's true 333 Hz went unnoticed while this reported ~160 Hz.
+        span = None
+        if self.first_seq is not None and self.last_seq is not None:
+            span = self.last_seq - self.first_seq + 1
         summary = {
             "frames": self.count,
             "bytes": self.offset,
             "duration_s": round(elapsed, 3),
             "mean_rate_hz": round(rate, 2),
             "sequence_gaps": self.gaps,
+            "frames_missed": self.missed,
+            "seq_span": span,
+            "capture_fraction": round(self.count / span, 4) if span else None,
+            "publisher_rate_hz": round(span / elapsed, 2) if span and elapsed else None,
+            "seq_unparsed": self.seq_unparsed,
+            "payload_kind": self.payload_kind,
             "size_mismatches": self.size_mismatch,
         }
         path = os.path.join(self.session_dir, "meta.json")
@@ -157,11 +216,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", default=None, help="session name (default: timestamp)")
     ap.add_argument("--out", default=os.path.expanduser("~/ssd/captures"))
+    # Derived from this file's location, not hardcoded: recorder.py lives in
+    # <ws>/scripts/, so the config sits at <ws>/src/mmWave_DRV/config/. A
+    # hardcoded absolute path here broke silently when the tree was moved.
     ap.add_argument(
         "--config",
-        default=os.path.expanduser(
-            "~/ssd/chris-launch-monitor/src/mmWave_DRV/config/"
-            "awr1843_launchmonitor.json"
+        default=os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "src", "mmWave_DRV", "config", "awr1843_launchmonitor.json",
         ),
     )
     ap.add_argument("--note", default="", help="free-text description of the capture")
