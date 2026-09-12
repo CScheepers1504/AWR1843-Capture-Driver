@@ -164,6 +164,18 @@ class MMWaveControlNode(Node):
     :param int toggle: toggle is either a 1 or 0. 1 starts recording and 0 stops recording
     :raises AnyError: raises error and exits program execution if error response was received from startSensor or startRecord command
     """
+        # errDEV_ and errDCA_ were set once and NEVER cleared, so a single
+        # failed command poisoned every later response: after one "Error -54"
+        # on START, the STOP that followed reported status=False even though
+        # sensorStop had succeeded. The flags are meant to describe THIS
+        # command, not the process history -- so clear them on entry.
+        # errDCA_ doubles as the "socket never opened" guard, so only clear it
+        # when there is in fact a socket (setup_DCA1000 now checks the socket
+        # directly).
+        self.errDEV_ = False
+        if self.dca_socket is not None:
+            self.errDCA_ = False
+
         ## Configure Radar System --------------------------------------------------------------------------------
         if (request.command == request.SETUP):
             self.cfgDEV_ = False
@@ -243,8 +255,9 @@ class MMWaveControlNode(Node):
     command from DCA1000. 
     :raises AnyError: raises errors if setup commands failed
     """
-        if self.errDCA_:
+        if self.dca_socket is None:
             self.get_logger().error("DCA1000 setup failed: Socket not open.")
+            self.errDCA_ = True
             return
 
         # Set up DCA
