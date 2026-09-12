@@ -152,7 +152,19 @@ class MMWaveDataNode : public rclcpp::Node
 
         // Setup ROS2 Components ---------------------------------------------------------------
         RCLCPP_INFO(this->get_logger(),"PUBLISHER:");
-        data_publisher = this->create_publisher<mmwave_drv::msg::Frame>(devDPUB, 10);
+        // Best-effort, not the default reliable QoS. With reliable + KeepLast(10),
+        // a subscriber that falls behind blocks publish() (Fast-DDS blocks up to
+        // max_blocking_time, default 100 ms) instead of dropping. That stalls the
+        // capture thread, so surplus device frames are lost at the socket layer
+        // while the published sequence stays contiguous -- the loss is invisible.
+        // Measured effect of that throttle: 333 Hz configured, 76 Hz sustained,
+        // with only 3 sequence gaps over 2997 frames (capture 2026-08-24_17-54-30).
+        //
+        // Best-effort makes any shortfall show up honestly as sequence gaps in
+        // recorder.py rather than as a silent reduction in frame rate. The
+        // subscriber QoS in recorder.py must match or the topics will not connect.
+        auto data_qos = rclcpp::QoS(rclcpp::KeepLast(100)).best_effort();
+        data_publisher = this->create_publisher<mmwave_drv::msg::Frame>(devDPUB, data_qos);
         RCLCPP_INFO(this->get_logger(),"Device publishder started.");
         RCLCPP_INFO(this->get_logger(),"Node Setup Finished.\n");
 
@@ -219,6 +231,12 @@ class MMWaveDataNode : public rclcpp::Node
             _readPtr = 0;
             _writePtr = 0;
             _writeBytesAvail = bufSize;
+            // The DCA1000 restarts its packet counter with the stream, so a
+            // stale prevPackNum here would compare against the previous
+            // run's numbering.
+            prevPackNum = 0;
+            packetNum = 0;
+            zeroPacketsInserted = 0;
           }
         } else {
           //RCLCPP_INFO(this->get_logger(),"Received %s bytes." , std::to_string(n).c_str());
@@ -230,11 +248,25 @@ class MMWaveDataNode : public rclcpp::Node
           }
           //RCLCPP_INFO(this->get_logger(),"Received packet number %s.", std::to_string((packetNum)).c_str());
 
-          // Check for dropped packets and push zeros to buffer
-          if ((packetNum- prevPackNum)>1){
-            RCLCPP_WARN(this->get_logger(),"Dropped %s packets.", std::to_string((packetNum - prevPackNum)).c_str());
-            
-            int numZeroPackets = (packetNum - prevPackNum); // calculate the number of missing bytes
+          // Check for dropped packets and push zeros to buffer.
+          //
+          // The count is (packetNum - prevPackNum - 1), NOT the difference
+          // itself: consecutive packets differ by 1 and nothing is missing.
+          // Without the -1 every drop inserts one packet too many, which
+          // shifts the byte stream permanently and misaligns every frame
+          // boundary after the first drop. Downstream that reads as a
+          // rotation of the transmitter firing order, because the chirps of
+          // a frame are then attributed to the wrong Tx. That is the fault
+          // behind the ordering slip observed between 14:28 and 14:30 on
+          // 9 September 2026 -- see the session notes for that date.
+          if ((packetNum - prevPackNum) > 1){
+            int numZeroPackets = packetNum - prevPackNum - 1;
+            zeroPacketsInserted += numZeroPackets;
+            RCLCPP_WARN(this->get_logger(),
+                "Dropped %s packets (%s zero-filled so far this run). Frame "
+                "alignment is preserved but these frames carry zeros.",
+                std::to_string(numZeroPackets).c_str(),
+                std::to_string(zeroPacketsInserted).c_str());
             unsigned char zeroBytes[MAX_PACKET_DATA_SIZE] = {0x00}; 
             for(int i = 0; i<numZeroPackets;i++)
             {
@@ -258,6 +290,20 @@ class MMWaveDataNode : public rclcpp::Node
 
     int bufWrite( unsigned char *dataPtr, int numBytes ) {
       // Simultaneously keep track of how many bytes we've written and our position in the incoming buffer
+      //
+      // _writeBytesAvail was maintained but never read, so the ring buffer
+      // could lap the reader and overwrite unread bytes with no symptom
+      // other than corrupted frames much later. Writing anyway is the right
+      // behaviour -- dropping the newest data would be worse -- but it must
+      // be visible.
+      if(numBytes > _writeBytesAvail){
+        RCLCPP_ERROR(this->get_logger(),
+            "Ring buffer overflow: writing %s bytes with only %s free of %s. "
+            "The reader is not keeping up and frames are now corrupt.",
+            std::to_string(numBytes).c_str(),
+            std::to_string(_writeBytesAvail).c_str(),
+            std::to_string(bufSize).c_str());
+      }
       if(numBytes > bufSize - _writePtr)
       {		//std::cout<<"TRACE 5"<<std::endl;
             int len = bufSize-_writePtr;
@@ -311,14 +357,22 @@ class MMWaveDataNode : public rclcpp::Node
         bufRead(dataToPublish,frameSize);
         bytesWritten -= frameSize;
         std::vector<unsigned char> data_vector(dataToPublish, dataToPublish + frameSize);
-        message.frame_data = data_vector;
+        // Move, don't copy. Copy-assignment here duplicated the whole 24 kB frame
+        // a second time before DDS serialisation copied it again.
+        message.frame_data = std::move(data_vector);
         message.frame_size = frameSize;
         message.header.stamp = this->get_clock()->now();
         message.header.set__frame_id(std::to_string(count));
         count++;
-        RCLCPP_INFO(this->get_logger(), "Publishing Frame %s.", std::to_string(count).c_str());
+        // Do NOT log per frame here. run.sh pipes stdout through tee, so an
+        // RCLCPP_INFO on this path is a synchronous write into a pipe from the
+        // capture thread -- at 333 Hz that stalls the thread that should be
+        // draining the UDP socket, and surplus device frames are lost in the
+        // kernel buffer. Periodic only.
+        if (count % 500 == 0){
+          RCLCPP_INFO(this->get_logger(), "Published %d frames.", count);
+        }
         data_publisher->publish(message);
-        //RCLCPP_INFO(this->get_logger(), "Published Frame.\n");
       }
     }
 
@@ -360,8 +414,15 @@ class MMWaveDataNode : public rclcpp::Node
 
     // Data Collection Variables
     int packetNum = 0;
-    int prevPackNum;
+    // Initialised, and reset alongside the buffer pointers on a config
+    // reload. Left indeterminate it feeds the dropped-packet comparison on
+    // the very first packet of a run.
+    int prevPackNum = 0;
     int bytesWritten = 0;
+    // Cumulative zero packets inserted this run. Zero-filling keeps frame
+    // alignment but the samples are fabricated, so a capture with a nonzero
+    // count here has holes in it and the number belongs in the log.
+    long zeroPacketsInserted = 0;
 
     // Socket Variables
     int sockfd; /* Socket file descriptor number */
