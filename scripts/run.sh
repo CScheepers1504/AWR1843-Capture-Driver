@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-WS=~/ssd/chris-launch-monitor
+# Derive the workspace from this script's own location rather than hardcoding
+# it. A hardcoded path silently broke every script in scripts/ when the tree
+# was moved one level deeper; set -e then aborted on the missing setup.bash.
+WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source /opt/ros/foxy/setup.bash
 source "$WS/install/setup.bash"
 
