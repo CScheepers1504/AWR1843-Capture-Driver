@@ -16,10 +16,41 @@
 #   --no-deploy    skip the file push
 #   --no-pull      leave the capture on the Jetson
 #   --monitor      also sample the wire rate during the capture
-#   --stop         stop the driver and exit (no recording)
+#   --reference    record an EMPTY-scene Tx-order reference for this rig, on a
+#                  fresh relaunch (name optional). Every later take is checked
+#                  against it until the radar is moved.
+#   --stop         stop the sensor AND the driver, then exit (no recording)
+#   --reset        kill everything, probe the CLI port, stop the sensor over serial
 #   --dest PATH    where to pull captures to
 #
 # Environment overrides: REMOTE, REMOTE_PATH, CAPTURES, DEST.
+#
+# FAILURE HANDLING (13 Sep 2026). Takes were hanging, poisoning the take after
+# them, or recording silently wrong data, through failures nothing reported:
+#   1. A failed STOP was ignored (`|| true`). The sensor could be left chirping
+#      with the node's RECRD flag stale, and the next SETUP then timed out.
+#      A failed STOP now stops the sensor over raw serial and kills the driver.
+#   2. --restart killed the nodes but never stopped the sensor, so it failed
+#      SETUP the same way. Every relaunch now stops the sensor first.
+#   3. A SETUP/START failure now triggers one automatic relaunch before giving
+#      up -- what "--stop, then take again" did by hand.
+#   4. Ctrl-C killed the local ssh and orphaned the recorder on the Jetson;
+#      three had piled up. Ctrl-C now stops the remote recorder and the
+#      sensor, and leftover recorders are swept before every take.
+#   5. "already started or stopped" was matched anywhere in the last 40 log
+#      lines, so a STALE Error -54 could pass a NEW failure as success, and the
+#      recorder then waited forever. Only lines logged after the command count.
+#   6. START answering "already started" is now a FAILURE, not "already in that
+#      state". The sensor was chirping before the DCA1000 armed, so the capture
+#      can join mid-frame -- the leading (UNCONFIRMED) suspect for the Tx-order
+#      rotations of 9 and 13 Sep.
+#   7. Every take's Tx slot order is checked against a per-rig reference
+#      (scripts/tx_order_check.py). On 13 Sep 3 of 9 captures were rotated by
+#      one slot: perfect range data, silently wrong angles. A rotated take is
+#      renamed *_TXSLIP and the driver is stopped so the next take relaunches.
+# The recorder also gives up after 8 s with no frames (exit 3) instead of
+# hanging, and this script samples the wire before stopping so the dead stage
+# is identifiable.
 
 set -euo pipefail
 
@@ -34,8 +65,10 @@ CAPTURES="${CAPTURES:-/home/mmwave/ssd/captures}"
 cd "$(dirname "$0")"
 
 NAME=""; NOTE=""; FRAMES=2000
-DO_DEPLOY=1; DO_PULL=1; RESTART=0; CLEAN=0; MONITOR=0; STOP_ONLY=0 RESET=0
+DO_DEPLOY=1; DO_PULL=1; RESTART=0; CLEAN=0; MONITOR=0; STOP_ONLY=0; RESET=0
+REFERENCE=0
 DEST_ARG=""
+ARMED=0; LOG=""
 
 while [[ $# -gt 0 ]]; do
     arg="$1"
@@ -57,7 +90,8 @@ while [[ $# -gt 0 ]]; do
         --verbose|-v) set -x; shift ;;
         --stop)    STOP_ONLY=1; shift ;;
         --reset)   RESET=1; shift ;;
-        -h|--help) sed -n '2,25p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        --reference) REFERENCE=1; RESTART=1; shift ;;
+        -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
         -*) echo "unknown option: $arg" >&2; exit 2 ;;
         *) if [[ -z "$NAME" ]]; then NAME="$arg"; elif [[ -z "$NOTE" ]]; then NOTE="$arg"; fi; shift ;;
     esac
@@ -114,10 +148,11 @@ driver_up() { r "pgrep -f '[r]adar_data' >/dev/null 2>&1 && pgrep -f '[r]adar_ct
 # ctrl node fails to bind with EADDRINUSE, its DCA1000 setup fails, and SETUP
 # then fails downstream with a misleading serial error. driver_up() needs BOTH
 # nodes, so a lone orphan reads as "nothing running" and gets launched on top.
+# Recorders too: one left subscribed competes for CPU with the next take's.
 kill_all() {
-    r "pkill -f '[r]os2 launch mmwave_drv' || true; pkill -f '[r]adar_ctrl_node' || true; pkill -f '[r]adar_term_cli' || true; pkill -f '[r]adar_gui_cli' || true; pkill -f '[r]adar_data' || true"
+    r "pkill -f '[r]ecorder.py' || true; pkill -f '[r]os2 launch mmwave_drv' || true; pkill -f '[r]adar_ctrl_node' || true; pkill -f '[r]adar_term_cli' || true; pkill -f '[r]adar_gui_cli' || true; pkill -f '[r]adar_data' || true"
     sleep 2
-    r "pkill -9 -f '[r]adar_ctrl_node' || true; pkill -9 -f '[r]adar_data' || true"
+    r "pkill -9 -f '[r]ecorder.py' || true; pkill -9 -f '[r]adar_ctrl_node' || true; pkill -9 -f '[r]adar_data' || true"
     sleep 1
     # Whatever still holds 4096 will break the next launch. Say so now.
     if r "ss -uln 2>/dev/null | grep -q :4096"; then
@@ -126,11 +161,26 @@ kill_all() {
     fi
 }
 
+# Killing the nodes does NOT stop the sensor: it keeps chirping with no host
+# attached, and the next SETUP's flushCfg then fails. So every path that kills
+# the driver finishes here, over raw serial with no ROS in the way. The nodes
+# must already be down, or radar_ctrl_node still holds the port.
+serial_stop() {
+    echo "  stopping the sensor over raw serial ..."
+    r "cd '$REMOTE_PATH' && python3 scripts/sensor_stop.py" 2>&1 | sed 's/^/    /' \
+        || echo "  sensor_stop.py did not confirm a stop -- if SETUP fails next, power-cycle the radar" >&2
+}
+
+latest_log() { r "ls -t '$REMOTE_PATH'/logs/launch_*.log 2>/dev/null | head -1" | tr -d '\r'; }
+log_lines()  { r "wc -l < '$LOG' 2>/dev/null || echo 0" | tr -d '\r '; }
+
 SVC_NAME="${SVC_NAME:-/control_radar}"
 
 svc() {  # svc <0|1|2> <label> [timeout_s]
-    local out tail_log
+    local out new_log n0
     printf %s "  $2 ..."
+    [[ -n "$LOG" ]] || LOG=$(latest_log)
+    n0=$(log_lines)
     # timeout, because ros2 service call blocks indefinitely on a service that
     # never appears rather than failing. SETUP uploads the whole profile one
     # serial command at a time and legitimately takes ~4 s, so allow 30.
@@ -140,31 +190,42 @@ svc() {  # svc <0|1|2> <label> [timeout_s]
         return 0
     fi
 
-    tail_log=$(r "tail -40 \$(ls -t $REMOTE_PATH/logs/launch_*.log | head -1)" 2>/dev/null || true)
+    # Only what the driver logged in response to THIS command. Scanning the
+    # last 40 lines instead let a stale "Error -54" from an earlier take pass a
+    # new START failure as "already in that state", and the recorder then
+    # waited forever for a sensor that never started (13 Sep 2026).
+    sleep 0.5
+    new_log=$(r "tail -n +$((n0 + 1)) '$LOG'" 2>/dev/null || true)
 
     # "Error -54: Sensor has already been started or stopped" is the radar
     # saying it is ALREADY in the state we asked for. For START and STOP that
     # is the desired end state, not a failure -- and treating it as one is how
     # a good capture got thrown away on 29 Aug. SETUP is different: there -54
     # means the sensor is chirping and the CLI refused flushCfg.
-    if [[ "$1" != 2 ]] && grep -q "already been started or stopped" <<<"$tail_log"; then
-        echo " already in that state -- continuing"
+    if [[ "$1" == 0 ]] && grep -q "already been started or stopped" <<<"$new_log"; then
+        echo " already stopped -- continuing"
         return 0
+    fi
+    # START is NOT the same. "Already started" means the sensor was chirping
+    # before the DCA1000 was told to record, so the capture can join the stream
+    # mid-frame with the Tx slots rotated -- range data perfect, angles wrong.
+    # Accepting it (as this script did until 13 Sep) records exactly that.
+    if [[ "$1" == 1 ]] && grep -q "already been started or stopped" <<<"$new_log"; then
+        echo " FAILED -- the sensor was already chirping"
+        echo "  Recording now could join the stream mid-frame and rotate the Tx order." >&2
+        return 1
     fi
 
     echo " FAILED"
     sed "s/^/    /" <<<"$out" >&2
     if grep -q "status=False" <<<"$out"; then
-        echo "  The radar REJECTED this command (the control node answered fine)." >&2
-        echo "  Driver log says:" >&2
-        grep -iE "Error|Ignored|failed|not been started" <<<"$tail_log" | tail -12 | sed "s/^/    /" >&2 || true
-        echo "  If that is 'Sensor has already been started', a SECOND client is" >&2
-        echo "  driving /control_radar -- radar_term_cli.py arms the radar from" >&2
-        echo "  its own __init__. This script launches use_client:=false to stop" >&2
-        echo "  that, so a stale driver from before the fix is the likely cause:" >&2
-        echo "    .\session --restart <name>" >&2
-        echo "  Otherwise the sensor is chirping and the CLI refuses flushCfg:" >&2
-        echo "    .\session --reset" >&2
+        echo "  The control node answered, but the command failed. It logged:" >&2
+        grep -iE "Error|Ignored|failed|not been started|Device is running" <<<"$new_log" | tail -12 | sed "s/^/    /" >&2 || true
+        if grep -q "invalid response" <<<"$new_log"; then
+            echo "  'invalid response' = NO reply on the CLI serial port within 0.25 s." >&2
+            echo "  Usually the sensor is still chirping from an earlier take. If it" >&2
+            echo "  persists on a fresh driver, the CLI port may have moved:  --reset" >&2
+        fi
     else
         echo "  No response at all -- the control node is blocked." >&2
         echo "  services advertised:" >&2
@@ -173,31 +234,20 @@ svc() {  # svc <0|1|2> <label> [timeout_s]
     return 1
 }
 
-if (( RESET )); then
-    say "sensor reset (direct serial, no ROS)"
-    # The driver must be down first or it holds /dev/ttyACM0 open.
+# Graceful STOP through the node if it is up, then kill every node, then stop
+# the sensor over serial REGARDLESS. Not gated on the STOP succeeding: a wedged
+# node is exactly when this is needed, and a failed STOP is what left the
+# sensor chirping on 13 Sep.
+stop_driver() {
+    if driver_up; then
+        svc 0 STOP 10 || echo "  (graceful stop failed -- killing and stopping over serial)"
+    fi
+    ARMED=0
     kill_all
-    sleep 2
-    bash deploy.sh >/dev/null
-    rsrc "python3 scripts/sensor_stop.py --flush" || true
-    echo "  now re-run with -restart"
-    exit 0
-fi
+    serial_stop
+}
 
-if (( STOP_ONLY )); then
-    say "stopping driver"
-    # Best-effort graceful stop, then kill regardless. Gating the kill on the
-    # service succeeding is how you end up unable to stop a wedged node -- and
-    # a wedged node is the single most likely reason to be running --stop.
-    driver_up && svc 0 STOP 10 || echo "  (graceful stop unavailable -- killing)"
-    kill_all
-    echo "  driver stopped"
-    exit 0
-fi
-
-[[ -n "$NAME" ]] || { echo "usage: session.sh <session-name> [note] [options]" >&2; exit 2; }
-
-if (( RESTART )) || ! driver_up; then
+launch_driver() {
     if (( DO_DEPLOY )); then
         say "deploy"
         bash deploy.sh
@@ -213,7 +263,9 @@ if (( RESTART )) || ! driver_up; then
         | tail -5
 
     say "launch"
-    kill_all
+    # stop_driver, not kill_all: kill_all alone left the sensor chirping and
+    # --restart then failed SETUP on a perfectly good radar (13 Sep 2026).
+    stop_driver
 
     # run.sh raises net.core.rmem_max, but it does that with sudo, which cannot
     # prompt over a non-interactive ssh -- so launching the driver from here
@@ -246,41 +298,195 @@ if (( RESTART )) || ! driver_up; then
 
     echo "  log: $LOG"
     echo "  waiting for the data node (up to 40 s) ..."
-    READY=0
+    local ready=0 i
     for i in $(seq 1 40); do
-        if r "grep -q 'Daemon is running' '$LOG' 2>/dev/null"; then READY=1; break; fi
+        if r "grep -q 'Daemon is running' '$LOG' 2>/dev/null"; then ready=1; break; fi
         sleep 1
     done
-    if [[ $READY -eq 0 ]]; then
+    if [[ $ready -eq 0 ]]; then
         echo "  driver did NOT come up. Last 25 log lines:"
         r "tail -25 '$LOG' 2>/dev/null" || echo "  (log empty or missing)"
         exit 1
     fi
     echo "  ready after ${i}s"
+}
+
+# --- Ctrl-C ---------------------------------------------------------------
+# Ctrl-C kills the LOCAL ssh only. The recorder on the Jetson has no terminal,
+# receives no signal, and waits for frames forever -- three had piled up by
+# 13 Sep, each subscribed and competing for CPU. SIGINT rather than SIGTERM so
+# it still writes its capture summary. The sensor is stopped too: left armed,
+# it makes the next take's SETUP fail.
+on_interrupt() {
+    trap - INT TERM ERR
+    say "interrupted -- cleaning up on the Jetson (Ctrl-C again to abandon)"
+    r "pkill -INT -f '[r]ecorder.py'; true" \
+        || echo "  could not reach the Jetson -- run there:  pkill -f '[r]ecorder.py'" >&2
+    if (( ARMED )); then
+        svc 0 STOP 10 || echo "  STOP failed -- the next take will stop the sensor and relaunch" >&2
+    fi
+    exit 130
+}
+trap on_interrupt INT TERM
+
+if (( RESET )); then
+    say "sensor reset (direct serial, no ROS)"
+    # The driver must be down first or it holds /dev/ttyACM0 open.
+    kill_all
+    sleep 2
+    bash deploy.sh >/dev/null
+    rsrc "python3 scripts/sensor_stop.py --flush" || true
+    echo "  now take again; the driver will relaunch"
+    exit 0
+fi
+
+if (( STOP_ONLY )); then
+    say "stopping sensor and driver"
+    stop_driver
+    echo "  driver stopped"
+    exit 0
+fi
+
+if (( REFERENCE )) && [[ -z "$NAME" ]]; then NAME="txref"; fi
+[[ -n "$NAME" ]] || { echo "usage: session.sh <session-name> [note] [options]" >&2; exit 2; }
+
+if (( RESTART )) || ! driver_up; then
+    # --reference always lands here: a fresh launch on a sensor just stopped
+    # over serial is the state least likely to join the stream mid-frame, so
+    # it is the best available guess at a correctly ordered reference.
+    launch_driver
 else
     say "driver already running -- reusing it (--restart to force a rebuild)"
+    LOG=$(latest_log)
+fi
+
+# --- leftover recorders ---------------------------------------------------
+# One Python recorder only just keeps up at 333 Hz on this Xavier NX, so an
+# orphan from an earlier interrupted take costs this take frames. Sweep.
+STALE=$(r "pgrep -af '[r]ecorder.py'; true" | tr -d '\r')
+if [[ -n "$STALE" ]]; then
+    echo "  WARNING: leftover recorder(s) on the Jetson -- killing them:" >&2
+    sed 's/^/    /' <<<"$STALE" >&2
+    r "pkill -f '[r]ecorder.py'; sleep 1; pkill -9 -f '[r]ecorder.py'; true"
 fi
 
 # --- arm the radar --------------------------------------------------------
 # SETUP uploads the whole profile over the serial link one command at a time
 # and takes ~4 s; do not shorten the wait. Both are idempotent, so re-arming
 # an already-armed radar is harmless.
+arm() {
+    svc 2 SETUP || return 1
+    sleep 1
+    svc 1 START || return 1
+    ARMED=1
+    sleep 1
+}
+
 say "arm"
-svc 2 SETUP
-sleep 1
-svc 1 START
-sleep 1
+if ! arm; then
+    # A previous take's failed STOP, or a Ctrl-C, leaves the sensor chirping
+    # and the node's RECRD flag stale, and SETUP cannot recover either from
+    # inside the node. A fresh driver on a sensor stopped over serial can.
+    say "arm failed -- stopping the sensor and relaunching once"
+    DO_DEPLOY=0; CLEAN=0
+    launch_driver
+    say "arm (after relaunch)"
+    if ! arm; then
+        echo "  arm failed after a relaunch too, so this is not stale state." >&2
+        echo "  Next:  session.sh --reset   (probes the CLI port and baud)" >&2
+        exit 1
+    fi
+fi
 
 # --- record ---------------------------------------------------------------
 say "record: $NAME ($FRAMES frames)"
+MONPID=""
 if (( MONITOR )); then
     ( rsrc "IFACE= scripts/monitor.sh 5" 2>&1 | sed 's/^/  [wire] /' ) &
     MONPID=$!
 fi
-rsrc "scripts/record.sh '$NAME' '$NOTE' --max-frames $FRAMES" 2>&1 | sed 's/^/  /'
-(( MONITOR )) && wait "$MONPID" 2>/dev/null || true
+REC_RC=0
+# tee a copy: the capture directory is only known from the recorder's own
+# "Recording to <dir>" line, and the Tx-order check below needs it.
+RECLOG=$(mktemp)
+rsrc "scripts/record.sh '$NAME' '$NOTE' --max-frames $FRAMES" 2>&1 | tee "$RECLOG" | sed 's/^/  /' || REC_RC=$?
+CAPDIR=$(grep -o 'Recording to [^ ]*' "$RECLOG" | tail -1 | cut -d' ' -f3 || true)
+rm -f "$RECLOG"
+if [[ -n "$MONPID" ]]; then wait "$MONPID" 2>/dev/null || true; fi
 
-svc 0 STOP || true
+# Exit 3 is the recorder's no-frames timeout. Sample the wire BEFORE stopping,
+# while the fault is still live: once STOP runs the evidence is gone.
+if (( REC_RC == 3 )); then
+    echo "  NO FRAMES reached the recorder. Sampling the wire to find the dead stage:" >&2
+    rsrc "IFACE= scripts/monitor.sh 3" 2>&1 | sed 's/^/  [wire] /' || true
+    echo "  ~0 MB/s  -> radar or DCA1000 not streaming (START did not really happen)" >&2
+    echo "  ~14 MB/s -> DCA1000 streaming, data node not publishing" >&2
+fi
+
+# --- stop -----------------------------------------------------------------
+say "stop"
+if svc 0 STOP; then
+    ARMED=0
+else
+    # This used to be `|| true`. A failed STOP can leave the sensor chirping and
+    # the node's RECRD flag stale, and the NEXT take's SETUP then fails with
+    # "invalid response" -- far from the cause. Stop everything now instead.
+    echo "  WARNING: STOP failed. Stopping the sensor over serial and killing the" >&2
+    echo "  driver, so the next take relaunches clean (~20 s)." >&2
+    stop_driver
+fi
+
+if (( REC_RC != 0 )); then
+    echo >&2
+    echo "  recording FAILED (recorder exit $REC_RC) -- nothing pulled." >&2
+    exit 1
+fi
+
+# --- Tx slot order --------------------------------------------------------
+# The rotation of 9 and 13 Sep is invisible in range data and fatal to angles,
+# and nothing upstream can see it, so every take is compared with a reference
+# of the same rig. RELATIVE check only: see the tx_order_check.py docstring.
+REF_FILE="$CAPTURES/.txorder_ref"
+if [[ -z "$CAPDIR" ]]; then
+    echo "  WARNING: could not find the capture directory in the recorder output; Tx order NOT checked." >&2
+elif (( REFERENCE )); then
+    say "Tx-order reference"
+    r "echo '$CAPDIR' > '$REF_FILE'"
+    echo "  $CAPDIR"
+    echo "  is now the reference for this rig. It must be an EMPTY scene, and it is"
+    echo "  valid only until the radar is moved or re-tilted -- then record a new one."
+else
+    say "Tx-order check"
+    REF=$(r "cat '$REF_FILE' 2>/dev/null; true" | tr -d '\r')
+    if [[ -z "$REF" ]]; then
+        echo "  NOT CHECKED -- no reference for this rig. With the scene empty, run once:" >&2
+        echo "    session.sh --reference" >&2
+    elif ! r "test -f '$REF/meta.json'"; then
+        echo "  NOT CHECKED -- the reference $REF no longer exists. Record a new one:  session.sh --reference" >&2
+    else
+        TX_RC=0
+        rsrc "python3 scripts/tx_order_check.py '$CAPDIR' --ref '$REF' --write-meta" 2>&1 | sed 's/^/  /' || TX_RC=$?
+        case "$TX_RC" in
+            0) ;;
+            4)
+                r "mv '$CAPDIR' '${CAPDIR}_TXSLIP'"
+                echo "  ************************************************************" >&2
+                echo "  Tx ORDER DIFFERS FROM THE REFERENCE. Renamed to *_TXSLIP." >&2
+                echo "  Do not use its angles. Stopping the driver so the next take" >&2
+                echo "  relaunches -- it is not known whether the slip persists." >&2
+                echo "  ************************************************************" >&2
+                stop_driver
+                ;;
+            5)
+                echo "  UNSURE: the scene may have changed too much since the reference," >&2
+                echo "  or the radar was moved. If it was moved, record a new reference." >&2
+                ;;
+            *)
+                echo "  Tx-order check could not run (exit $TX_RC) -- order NOT checked." >&2
+                ;;
+        esac
+    fi
+fi
 
 # --- pull -----------------------------------------------------------------
 if (( DO_PULL )); then
@@ -295,7 +501,7 @@ if (( DO_PULL )); then
     # mode this codebase keeps producing.
     rsync -rltv --partial -e "ssh -o ControlPath=$SOCK" \
         "$REMOTE:$CAPTURES/" "$DEST/"
-    LATEST=$(ls -dt "$DEST"/*_"$NAME" 2>/dev/null | head -1 || true)
+    LATEST=$(ls -dt "$DEST"/*_"$NAME" "$DEST"/*_"$NAME"_TXSLIP 2>/dev/null | head -1 || true)
     [[ -n "$LATEST" ]] && echo "  latest: $LATEST"
 fi
 

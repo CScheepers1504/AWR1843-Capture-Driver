@@ -14,6 +14,7 @@ Run AFTER sourcing the workspace, e.g.
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -57,11 +58,14 @@ def derive_dims(cfg):
 
 
 class Recorder(Node):
-    def __init__(self, session_dir, cfg, dims, max_frames):
+    def __init__(self, session_dir, cfg, dims, max_frames, no_frames_timeout):
         super().__init__("radar_recorder")
         self.session_dir = session_dir
         self.dims = dims
         self.max_frames = max_frames
+        self.no_frames_timeout = no_frames_timeout
+        self.t_start = time.time()
+        self.exit_code = 0
 
         self.bin_f = open(os.path.join(session_dir, "frames.bin"), "wb")
         self.idx_f = open(os.path.join(session_dir, "index.csv"), "w")
@@ -91,6 +95,26 @@ class Recorder(Node):
         self.get_logger().info(
             "Recording to %s (expecting %d B/frame)" % (session_dir, dims["frame_bytes"])
         )
+
+        # Without this the recorder waits forever when nothing is publishing,
+        # and a dead stream looks exactly like a slow one. On 13 Sep that hang
+        # was Ctrl-C'd three times over ssh, orphaning a recorder each time.
+        self.watchdog = None
+        if no_frames_timeout > 0:
+            self.watchdog = self.create_timer(1.0, self.check_stream)
+
+    def check_stream(self):
+        if self.count > 0:
+            self.watchdog.cancel()
+            return
+        if time.time() - self.t_start > self.no_frames_timeout:
+            self.get_logger().error(
+                "NO FRAMES after %.0f s -- nothing is publishing on radar_data. "
+                "The sensor is not streaming, or the data node is not publishing."
+                % self.no_frames_timeout
+            )
+            self.exit_code = 3
+            raise SystemExit(3)
 
     def on_frame(self, msg):
         now = time.time()
@@ -211,6 +235,12 @@ class Recorder(Node):
             print("  %-18s %s" % (k, v))
         print("  written to        %s" % self.session_dir)
 
+        # An empty capture directory is worse than none: the pull copies it and
+        # it sorts as the "latest" take under that name.
+        if self.count == 0:
+            shutil.rmtree(self.session_dir, ignore_errors=True)
+            print("  no frames -- removed the empty capture directory")
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -228,6 +258,10 @@ def main():
     )
     ap.add_argument("--note", default="", help="free-text description of the capture")
     ap.add_argument("--max-frames", type=int, default=0, help="0 = until Ctrl+C")
+    # 8 s, not 2: Foxy's DDS discovery takes a second or two to match the
+    # publisher, and a false timeout would cost a good take.
+    ap.add_argument("--no-frames-timeout", type=float, default=8.0,
+                    help="exit 3 if no frame arrives within this many seconds (0 = wait forever)")
     args = ap.parse_args()
 
     with open(args.config) as f:
@@ -254,7 +288,7 @@ def main():
         )
 
     rclpy.init()
-    node = Recorder(session_dir, cfg, dims, args.max_frames)
+    node = Recorder(session_dir, cfg, dims, args.max_frames, args.no_frames_timeout)
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, SystemExit):
@@ -264,6 +298,9 @@ def main():
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+    # Non-zero on the no-frames timeout, so session.sh can tell a dead stream
+    # from a finished take instead of pulling nothing and calling it done.
+    sys.exit(node.exit_code)
 
 
 if __name__ == "__main__":

@@ -221,6 +221,23 @@ class MMWaveDataNode : public rclcpp::Node
             
             frameSize = numChirps*numSamples*bytesPerSample*realOrComplex*numReceivers*numTransmitters; // calculate required buffer Size
             
+            // Report what the previous stream left behind, once per idle
+            // period (after the first reset both are 0 and this is silent).
+            // A nonzero tail is the carry-over that rotates the next take's
+            // Tx order if it is not cleared -- and this line appearing at all
+            // proves the reset path runs between takes (15 Sep 2026).
+            if (bytesWritten != 0 || packetNum != 0) {
+              int chirpBytes = numSamples*bytesPerSample*realOrComplex*numReceivers;
+              RCLCPP_INFO(this->get_logger(),
+                  "Stream idle: resetting capture buffers. Unpublished tail %d B "
+                  "(%.2f chirps), last packet number %d.",
+                  bytesWritten, (double)bytesWritten / chirpBytes, packetNum);
+            }
+            // Free the previous run's buffers. This path fires every 2 s while
+            // the stream is idle, so without these it leaked both buffers on
+            // every timeout.
+            delete[] dataToPublish;
+            delete[] dataBuf;
             dataToPublish = new unsigned char [frameSize];
             memset(dataToPublish,0x00,frameSize);
 
@@ -231,6 +248,15 @@ class MMWaveDataNode : public rclcpp::Node
             _readPtr = 0;
             _writePtr = 0;
             _writeBytesAvail = bufSize;
+            // bytesWritten counts unread bytes in the ring. It was NOT reset
+            // here, so the partial frame left over when the previous take
+            // stopped survived into the next take: the pointers restarted at 0
+            // but the count still said R bytes were waiting. Every frame of
+            // the next take was then published R bytes early, a permanent
+            // misalignment. The first take after a launch starts at 0, which
+            // is why only takes 2+ on a reused driver went wrong (15 Sep 2026).
+            bytesWritten = 0;
+            awaitingFirstPacket = true;
             // The DCA1000 restarts its packet counter with the stream, so a
             // stale prevPackNum here would compare against the previous
             // run's numbering.
@@ -247,6 +273,16 @@ class MMWaveDataNode : public rclcpp::Node
             packetNum = packetNum | (incoming_udp_packet[i] << i*8);
           }
           //RCLCPP_INFO(this->get_logger(),"Received packet number %s.", std::to_string((packetNum)).c_str());
+          // Once per stream. The dropped-packet check below assumes the
+          // DCA1000 restarts its counter at every record start; this line is
+          // the evidence for or against that, and n shows the packet size
+          // the zero-fill assumes is MAX_PACKET_DATA_SIZE.
+          if (awaitingFirstPacket) {
+            awaitingFirstPacket = false;
+            RCLCPP_INFO(this->get_logger(),
+                "Stream started: first packet number %d, %d B, buffered tail %d B.",
+                packetNum, n, bytesWritten);
+          }
 
           // Check for dropped packets and push zeros to buffer.
           //
@@ -423,6 +459,8 @@ class MMWaveDataNode : public rclcpp::Node
     // alignment but the samples are fabricated, so a capture with a nonzero
     // count here has holes in it and the number belongs in the log.
     long zeroPacketsInserted = 0;
+    // True from launch and after every idle reset, until the next packet.
+    bool awaitingFirstPacket = true;
 
     // Socket Variables
     int sockfd; /* Socket file descriptor number */

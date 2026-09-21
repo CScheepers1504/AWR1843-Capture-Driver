@@ -89,14 +89,20 @@ def main():
                  "  Either a driver process still holds it, or the radar is wedged --\n"
                  "  press NRST on the AWR1843BOOST, or power-cycle it, then retry.")
 
-    if args.flush:
-        send(ser, "flushCfg")
-    cli_port = ser.port
-    ser.close()
-
     # "Done", "already stopped" and "not been started" all mean the same thing
     # for our purposes: the sensor is not chirping.
     ok = any(k in reply for k in ("Done", "already", "not been started"))
+
+    # sensorStop can answer with only its echo and the prompt -- seen on
+    # 15 Sep 2026 on a stopped sensor -- and this script then told you to
+    # power-cycle a radar that was fine. flushCfg is the authoritative test:
+    # the CLI refuses it while the sensor is running. Send it whenever the
+    # stop reply is ambiguous. Harmless: every SETUP begins with flushCfg.
+    if args.flush or not ok:
+        if "Done" in send(ser, "flushCfg"):
+            ok = True
+    cli_port = ser.port
+    ser.close()
     print("\nCLI port is %s" % cli_port)
     if cli_port != "/dev/ttyACM0":
         print("NOTE: radar_config.yaml hardcodes ser_addr: '/dev/ttyACM0'.")
