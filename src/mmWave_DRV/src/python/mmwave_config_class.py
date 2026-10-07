@@ -25,7 +25,20 @@ class mmWaveConfig():
                     'lvdsStreamCfg'     : 4, 
                     'calibMonCfg'       : 2}
     
-    AWR1642_config_list = {'dfeDataOutputMode'  : 1, 
+    # Optional commands, from TI's xwr18xx mmw demo config. Accepted in
+    # any position after the required ones, sent in file order. They exist only in
+    # firmware that implements them (the stock mmw demo); firmware that does not
+    # will reject them and SETUP fails, so they live in a separate profile.
+    #   compRangeBiasAndRxChanPhase : range bias + 12 (re, im) channel phase compensation
+    #   measureRangeBiasAndRxChanPhase : <enable> <target distance m> <search window m>;
+    #                                 with a reflector at boresight, prints the vector above
+    #   calibData                   : <save> <restore> <flash offset>; save the boot RF
+    #                                 calibration once, restore it on later boots
+    AWR1843_optional_list = {'compRangeBiasAndRxChanPhase'    : 25,
+                             'measureRangeBiasAndRxChanPhase' : 3,
+                             'calibData'                      : 3}
+
+    AWR1642_config_list = {'dfeDataOutputMode'  : 1,
                     'channelCfg'        : 3, 
                     'adcCfg'            : 2, 
                     'adcbufCfg'         : 5, 
@@ -156,32 +169,39 @@ class mmWaveConfig():
         json needs to follow default dictionary format given in class constructor exactly. 
         :params string filePath: filePath to json file to loaded into class.
         """
+        self.error = None
         with open(filePath) as json_file:
             loadedDict = json.load(json_file) # load config file from json format
-            # check if keys are correct
 
-            error = False
+        if device_type == "AWR1843":
+            commandList, optionalList = self.AWR1843_config_list, self.AWR1843_optional_list
+        elif device_type == "AWR1642":
+            commandList, optionalList = self.AWR1642_config_list, {}
+        else:
+            self.error = "unknown device_type %r" % device_type
+            self.mmwaveParamDict = None
+            return
 
-            if device_type == "AWR1843":
-                commandList = self.AWR1843_config_list
+        keys = list(loadedDict.keys())
+        # Required commands: all present, in the expected order.
+        required = [k for k in keys if k in commandList]
+        if required != list(commandList.keys()):
+            self.error = ("required commands missing or out of order: got %s, expected %s"
+                          % (required, list(commandList.keys())))
+        else:
+            for k in keys:
+                n = commandList.get(k, optionalList.get(k))
+                if n is None:
+                    self.error = "unknown command %r" % k
+                    break
+                if len(loadedDict[k]) != n:
+                    self.error = "%s has %d settings, expected %d" % (k, len(loadedDict[k]), n)
+                    break
+                if k in optionalList and keys.index(k) < keys.index(list(commandList.keys())[-1]):
+                    self.error = "optional command %s must come after the required ones" % k
+                    break
 
-            elif device_type == "AWR1642":
-                commandList = self.AWR1642_config_list
-
-            else:
-                error = True
-            
-            if list(loadedDict.keys())==list(commandList.keys()): # check if correct commands present in file
-                for dictKey in loadedDict:
-                    if len(loadedDict[dictKey])!=commandList[dictKey]:
-                        error=True
-            else:
-                error=True
-
-            if error:
-                self.mmwaveParamDict = None
-            else:
-                self.mmwaveParamDict = loadedDict
+        self.mmwaveParamDict = None if self.error else loadedDict
 
     # %---------------------------------------------------------------------------------------------------------
     def get_mmWaveCommandString(self, cmd):

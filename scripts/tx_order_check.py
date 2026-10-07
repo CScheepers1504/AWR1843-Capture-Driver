@@ -7,39 +7,6 @@ Check that a capture's transmitter slot order matches a reference capture.
 
 Exit status: 0 same order, 4 rotated or misaligned, 5 unsure, 2 could not run.
 
-WHY THIS EXISTS
-
-On 9 and 13 Sep 2026 the TDM transmitter order rotated between recordings: 3 of
-9 captures on 13 Sep started one Tx slot out. The Rx order and the sample
-alignment were intact, so every range profile looked perfect and only the MIMO
-angles were wrong -- silently. Two captures of the same unmoved room would not
-even subtract: -1.7 dB of wall cancellation as recorded, -17.3 dB once the slot
-order was shifted back. The data carries no chirp index, so nothing upstream
-can see this happen.
-
-HOW
-
-A static room gives every (Tx, Rx) channel its own fixed range-profile
-signature. On 13 Sep different Tx differed by 41-51 dB^2 while the same channel
-one loop later matched to 0.1-0.2 dB^2, so the slot identity is well defined.
-The capture's per-channel signatures are compared with the reference's under
-every cyclic shift of the chirp slots.
-
-Each signature has its mean across channels removed, per range bin, first. A
-prop or a person that changes the scene changes all channels alike and cancels
-there, while a slot rotation reorders the channels and does not. The median
-over bins ignores the angle-dependent change that is left.
-
-WHAT IT CANNOT TELL YOU
-
-The order RELATIVE to the reference -- not which physical antenna fired first.
-If the reference started late, every capture that passes shares its rotation.
-That still keeps a calibration set self-consistent, which is the failure this
-prevents, but the estimators assume slot 2 is the raised antenna
-(angle_history.m) and array_cal.m's grid assumes slot 1 is not, so a rotated
-reference is wrong for them. session.sh records the reference on a fresh launch
-with the sensor stopped over serial, the state least likely to join mid-frame.
-
 The reference is valid only while the radar stays put. Moving or re-tilting it
 changes every signature: record a new one.
 """
@@ -51,10 +18,32 @@ import sys
 
 import numpy as np
 
+import chirp_align_check
+
 MARGIN = 1.5   # runner-up distance / best distance needed for a confident verdict
 
 
-def signature(cap, n_frames, skip_frames):
+def block_offset(cap):
+    """int16 to drop so the capture starts on an Rx-block boundary.
+
+    From meta.json chirp_align if chirp_align_check.py has stamped it, else
+    measured now. A capture with no clear block boundary cannot be compared.
+    The 13 Sep 282 Hz takes started 104-292 int16 into a block; compared
+    unaligned, a reference like that matched nothing (margin ~1.0).
+    """
+    with open(os.path.join(cap, "meta.json")) as f:
+        meta = json.load(f)
+    ca = meta.get("chirp_align")
+    if ca is None or ca.get("verdict") not in ("ALIGNED", "OFFSET"):
+        ca = chirp_align_check.check(cap, 200, 5)
+        ca["verdict"] = "UNSURE" if (ca["contrast"] < chirp_align_check.CONTRAST_MIN or
+                                     ca["margin"] < chirp_align_check.MARGIN_MIN) else "measured"
+    if ca["verdict"] == "UNSURE":
+        raise ValueError("%s: no clear chirp boundary in the samples" % cap)
+    return int(ca["drop_int16"]), meta.get("capture", {}).get("burst_slips")
+
+
+def signature(cap, n_frames, skip_frames, pre_i16=0):
     """Per-slot range-profile signature, (n_tx*n_rx, bins), mean across slots removed."""
     with open(os.path.join(cap, "meta.json")) as f:
         meta = json.load(f)
@@ -74,7 +63,7 @@ def signature(cap, n_frames, skip_frames):
     # seek + fromfile(file object), not fromfile(offset=): the offset argument
     # needs numpy >= 1.17 and the Jetson's version is not pinned anywhere.
     with open(path, "rb") as f:
-        f.seek(skip_frames * i16_per_frame * 2)
+        f.seek((skip_frames * i16_per_frame + pre_i16) * 2)
         raw = np.fromfile(f, dtype=np.int16, count=n * i16_per_frame).astype(np.float32)
 
     # AWR1843 2-lane packing, as fmcw_pipeline.m and array_cal.m read it:
@@ -107,8 +96,16 @@ def main():
     args = ap.parse_args()
 
     try:
-        sig, d = signature(args.capture, args.frames, args.skip_frames)
-        ref, dr = signature(args.ref, args.frames, args.skip_frames)
+        cap_pre, _ = block_offset(args.capture)
+        ref_pre, ref_slips = block_offset(args.ref)
+        if ref_slips:
+            # Relative check only: a reference with a timed whole-chirp slip
+            # would pass its rotation on to every capture that matches it.
+            print("tx order check could not run: the reference has %d frame starts "
+                  "off the frame grid (burst_slips). Record a new reference." % ref_slips)
+            return 2
+        sig, d = signature(args.capture, args.frames, args.skip_frames, cap_pre)
+        ref, dr = signature(args.ref, args.frames, args.skip_frames, ref_pre)
     except (OSError, ValueError, KeyError) as e:
         print("tx order check could not run: %s" % e)
         return 2
@@ -125,7 +122,9 @@ def main():
     best = int(np.argmin(dist))
     runner = float(np.min(np.delete(dist, best)))
     margin = min(runner / max(float(dist[best]), 1e-9), 999.0)
-    skip_i16 = 2 * best * nsamp
+    # Total realignment from the start of frames.bin: the sub-block offset, then
+    # whole blocks. The reference's own sub-block offset is already removed.
+    skip_i16 = cap_pre + 2 * best * nsamp
 
     if margin < MARGIN:
         verdict, code = "UNSURE", 5
@@ -138,18 +137,30 @@ def main():
 
     print("tx order check: %s" % os.path.basename(os.path.normpath(args.capture)))
     print("  reference     %s" % os.path.basename(os.path.normpath(args.ref)))
+    if cap_pre or ref_pre:
+        print("  pre-aligned   capture by %d int16, reference by %d int16 (chirp_align)"
+              % (cap_pre, ref_pre))
     order = np.argsort(dist)
     print("  best shifts   " + "   ".join("%d blocks: %.1f dB^2" % (s, dist[s]) for s in order[:3]))
     print("  margin        %.2f (confident at >= %.1f)" % (margin, MARGIN))
     if verdict == "MATCH":
         print("  verdict       MATCH -- same Tx slot order as the reference")
+        if cap_pre:
+            print("                (after dropping %d int16 to reach a block boundary)" % cap_pre)
     elif verdict == "ROTATED":
         k, ntx = best // nrx, d["n_tx"]
         print("  verdict       ROTATED by %d of %d Tx slots (= %d the other way). Angles from this capture are WRONG."
               % (k, ntx, ntx - k))
-        print("                To realign offline, drop %d blocks = %d int16 from the start." % (best, skip_i16))
+        print("                To realign offline, drop %d int16 from the start (%d to the block boundary + %d blocks)."
+              % (skip_i16, cap_pre, best))
     elif verdict == "RX_MISALIGNED":
-        print("  verdict       MISALIGNED by %d blocks -- not a whole chirp. Rx order is broken." % best)
+        # A constant offset, not corruption: the 13 Sep 282 Hz bg_d150 sat at
+        # 104 int16 + 6 blocks in every 60-frame window across 2000 frames.
+        print("  verdict       MISALIGNED by %d blocks -- the take starts mid-chirp, so Rx and Tx"
+              % best)
+        print("                slots are both shifted as recorded. Angles from it are WRONG.")
+        print("                To realign offline, drop %d int16 from the start (%d to the block boundary + %d blocks)."
+              % (skip_i16, cap_pre, best))
     else:
         print("  verdict       UNSURE -- best is %d blocks but the next shift is nearly as good." % best)
         print("                The scene may have changed too much since the reference.")
@@ -163,6 +174,8 @@ def main():
             "verdict": verdict,
             "shift_blocks": best,
             "realign_skip_int16": skip_i16,
+            "block_offset_int16": cap_pre,
+            "reference_block_offset_int16": ref_pre,
             "margin": round(margin, 3),
             "distances_db2": [round(float(v), 2) for v in dist],
         }

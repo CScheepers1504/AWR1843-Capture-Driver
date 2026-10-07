@@ -1,20 +1,25 @@
 // Standard Includes
-#include <functional>
-#include <string>
-#include <netinet/in.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <chrono>
-#include <thread>
-#include <memory>
-#include <iostream>
+#include <deque>
+#include <ctime>
 #include <fstream>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
 #include <thread>
+#include <vector>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <signal.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <jsoncpp/json/json.h>
 
@@ -22,461 +27,493 @@
 #include <rclcpp/rclcpp.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
-   
-
 // Package Includes
 #include "mmwave_drv/msg/frame.hpp"
-#include "mmwave_drv/ringbuffer.hpp"
-
-// Namespaces
-using namespace std::chrono_literals;
 
 // Defines
 #define PORT 4098
-#define DCA_IP_ADDR "192.168.33.30"
-#define BUFSIZE 1466
-#define DEVICE_NAME "RADAR"
+#define DCA_IP_ADDR "192.168.33.30"      // host address the DCA1000 streams to; we bind to it
+#define HEADER_BYTES 10                  // 4 B sequence number + 6 B byte count
 #define MAX_PACKET_DATA_SIZE 1456
-//#define RECV_BUFFER_DEFAULT_SIZE 65536
-#define RECV_BUFFER_DEFAULT_SIZE 536870912 //512mb
+// Room for a datagram larger than expected: it must be reported, not silently
+// truncated (recvfrom with MSG_TRUNC returns the real length).
+#define RECV_PACKET_BUF (HEADER_BYTES + MAX_PACKET_DATA_SIZE + 64)
+// Requested socket buffer. The old request (512 MB x 3 = 1.6 GB) exceeds what
+// some kernels can double without overflowing an int; the value actually
+// granted is read back and logged.
+#define RECV_BUFFER_REQUEST (256 * 1024 * 1024)
+#define RING_FRAMES 8
+
+// FRAME ALIGNMENT
+//
+// Every DCA1000 raw-mode packet carries, after its 4-byte sequence number, a
+// 6-byte BYTE COUNT: the stream position of the packet's first payload byte,
+// counted from RECORD_START. 
+//
+// Frames are cut at stream positions that are multiples of the frame
+// size. A late join (first byte count != 0) discards bytes up to the next
+// frame boundary. A dropped packet is zero-filled by exactly the number of
+// bytes the byte count says are missing. Each published frame carries its
+// stream offset, so the recorder can verify alignment and contiguity.
+//
+// BURST PHASE 
+// checks it from the radar's own timing instead. A
+// frame's chirps arrive as one burst of packets, then the link is idle until
+// the next frame. The first packet after an idle gap therefore starts at a
+// frame boundary IN THE RADAR'S STREAM. Its byte count says where that is in
+// the DCA1000's count. burst_phase = that byte count minus the nearest multiple
+// of the frame size: ~0 on an aligned take (or down to minus one packet, if
+// the card holds a part-filled packet until the next burst), a multiple of the
+// chirp size after a whole-chirp slip. Packet times are kernel receive
+// timestamps (SO_TIMESTAMPNS), so a backlog in this thread does not hide the gap.
 
 class MMWaveDataNode : public rclcpp::Node
 {
   public:
     MMWaveDataNode()
-    : Node("RADAR_data_node"), count(0)
+    : Node("RADAR_data_node")
     {
-        // Device Instantiation ----------------------------------------------------------------
-        RCLCPP_INFO(this->get_logger(),"RADAR DATA NODE:");
-        RCLCPP_INFO(this->get_logger(),"Starting c++ radar data node.\n");
-        char name[]= DEVICE_NAME;
-        // M2S2Device device(name);
+        RCLCPP_INFO(get_logger(), "RADAR DATA NODE: starting.");
 
-        // Create Socket -----------------------------------------------------------------------
-        RCLCPP_INFO(this->get_logger(),"CONNECTION SETUP:");
-        {
-          RCLCPP_INFO(this->get_logger(),"Creating Socket...");
+        // Socket ------------------------------------------------------------------------------
         sockfd = socket(AF_INET, SOCK_DGRAM, 0);
         if (sockfd < 0) {
-          RCLCPP_ERROR(this->get_logger(),"Could not create socket.\n");
+          throw std::runtime_error(std::string("could not create socket: ") + strerror(errno));
         }
-        RCLCPP_INFO(this->get_logger(),"Socket created successfully.\n");
-        
-        { // Set Socket options
-          // reuse address is on to prevent address already in use error 
-          optval = 1;
-          setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, 
-	              (const void *)&optval , sizeof(int));
+        int optval = 1;
+        setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
-          // set socket timeout to indefinite
-          struct timeval tv;
-          tv.tv_sec = 2;
-          tv.tv_usec = 0;
-          setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, 
-	              &tv, sizeof(tv));
+        // 2 s receive timeout: an idle period of this length ends a stream.
+        struct timeval tv;
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-          // set socket recvbuffer size
-          int recvbuf = RECV_BUFFER_DEFAULT_SIZE*3;
-          setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, 
-	              &recvbuf, sizeof(recvbuf));
+        int recvbuf = RECV_BUFFER_REQUEST;
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recvbuf, sizeof(recvbuf));
+        int granted = 0;
+        socklen_t glen = sizeof(granted);
+        getsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &granted, &glen);
+        RCLCPP_INFO(get_logger(), "UDP receive buffer: requested %d B, granted %d B%s",
+                    recvbuf, granted,
+                    granted < 16 * 1024 * 1024 ? "  (LOW: raise net.core.rmem_max)" : "");
+
+        // Kernel receive timestamps, for the burst-phase check. Without them
+        // the check falls back to the time recvmsg returns, which a backlog
+        // in this thread compresses.
+        int tsOn = 1;
+        kernelStamps = setsockopt(sockfd, SOL_SOCKET, SO_TIMESTAMPNS, &tsOn, sizeof(tsOn)) == 0;
+        if (!kernelStamps) {
+          RCLCPP_WARN(get_logger(), "SO_TIMESTAMPNS unavailable (%s): burst phase uses user-space "
+                      "receive times and may miss frame starts under load.", strerror(errno));
         }
-        
-        //assign values
+
+        struct sockaddr_in serveraddr;
+        std::memset(&serveraddr, 0, sizeof(serveraddr));
         serveraddr.sin_addr.s_addr = inet_addr(DCA_IP_ADDR);
         serveraddr.sin_family = AF_INET;
         serveraddr.sin_port = htons(PORT);
-
-        //checks connection
-        RCLCPP_INFO(this->get_logger(),"Connecting to device...");
         if (bind(sockfd, (struct sockaddr *)&serveraddr, sizeof(serveraddr)) < 0) {
-          RCLCPP_ERROR(this->get_logger(),"Connection error\n");
-        } else {
-          RCLCPP_INFO(this->get_logger(),"Connection successful.\n");
-        }
-        }
-
-        // Read config data ---------------------------------------------------------------------
-        RCLCPP_INFO(this->get_logger(),"DEVICE CONFIG:");
-        {
-
-          std::string package_name = "mmwave_drv";
-          std::string share_directory = ament_index_cpp::get_package_share_directory(package_name);
-          std::string dev_cfg_file_path = share_directory + "/config/cfgDev.json";
-
-          this->declare_parameter("dev_cfg_file_path", dev_cfg_file_path);
-
-          Json::Reader reader;
-          
-          std::string devCfgPath =this->get_parameter("dev_cfg_file_path").get_parameter_value().get<std::string>();
-          RCLCPP_INFO(this->get_logger(),"getting dev config at %s\n", devCfgPath.c_str());
-          std::ifstream dev(devCfgPath);
-          Json::Value devCfgData;
-          reader.parse(dev, devCfgData);
-
-          this->declare_parameter<std::string>("devNAME", "radar");
-          this->declare_parameter<std::string>("devSERV", "control_radar");
-          this->declare_parameter<std::string>("devSPUB", "radar_status");
-          this->declare_parameter<std::string>("devDPUB", "radar_data");
-          this->declare_parameter<std::string>("devLOGG", "radar: ");
-
-          devNAME = this->get_parameter("devNAME").as_string();
-          devSERV = this->get_parameter("devSERV").as_string();
-          devSPUB = this->get_parameter("devSPUB").as_string();
-          devDPUB = this->get_parameter("devDPUB").as_string();
-          devLOGG = this->get_parameter("devLOGG").as_string();
-        
-          // calculate parameters
-          int numChirps = devCfgData["frameCfg"]["numChirps"].asInt();
-          int numSamples = devCfgData["profileCfg"]["numAdcSamples"].asInt();
-          int bytesPerSample = 2; // adc either returns 12,14 or 16bit data which all have to be stored over 2 bytes 
-          int realOrComplex = (devCfgData["adcbufCfg"]["adcOutputFmt"].asInt()+2) % 3; //if 0 it is complex so 2%3 = 2, if 1 it is real 3%3=1
-          int numReceivers = maskToNum(devCfgData["channelCfg"]["rxChannelEn"].asInt()); // convert number to bit mask string with bin() and remove 0b from start of string
-          int numTransmitters = devCfgData["frameCfg"]["chirpEndIndex"].asInt() - devCfgData["frameCfg"]["chirpStartIndex"].asInt() + 1;
-          
-          frameSize = numChirps*numSamples*bytesPerSample*realOrComplex*numReceivers*numTransmitters; // calculate required buffer Size
-          
-          RCLCPP_INFO(this->get_logger(),"Frame size is: %s" , std::to_string(frameSize).c_str());
-
-          dataToPublish = new unsigned char [frameSize];
-          memset(dataToPublish,0x00,frameSize);
-
-          // Create buffer
-          RCLCPP_INFO(this->get_logger(),"Created %s byte ring buffer for data capture.\n" , std::to_string(bufSize).c_str());
-          bufSize = frameSize*6;
-          dataBuf = new unsigned char[bufSize];
-          memset( dataBuf, 0, bufSize );
-          _readPtr = 0;
-          _writePtr = 0;
-          _writeBytesAvail = bufSize;
+          // Previously logged and ignored: the node then ran with a socket that
+          // could never receive, which reads as "radar not streaming".
+          throw std::runtime_error(std::string("bind to ") + DCA_IP_ADDR + ":" +
+                                   std::to_string(PORT) + " failed: " + strerror(errno));
         }
 
-        // Setup ROS2 Components ---------------------------------------------------------------
-        RCLCPP_INFO(this->get_logger(),"PUBLISHER:");
-        // Best-effort, not the default reliable QoS. With reliable + KeepLast(10),
-        // a subscriber that falls behind blocks publish() (Fast-DDS blocks up to
-        // max_blocking_time, default 100 ms) instead of dropping. That stalls the
-        // capture thread, so surplus device frames are lost at the socket layer
-        // while the published sequence stays contiguous -- the loss is invisible.
-        // Measured effect of that throttle: 333 Hz configured, 76 Hz sustained,
-        // with only 3 sequence gaps over 2997 frames (capture 2026-08-24_17-54-30).
-        //
-        // Best-effort makes any shortfall show up honestly as sequence gaps in
-        // recorder.py rather than as a silent reduction in frame rate. The
-        // subscriber QoS in recorder.py must match or the topics will not connect.
+        // Config ------------------------------------------------------------------------------
+        std::string share_directory = ament_index_cpp::get_package_share_directory("mmwave_drv");
+        declare_parameter("dev_cfg_file_path", share_directory + "/config/cfgDev.json");
+        declare_parameter<std::string>("devNAME", "radar");
+        declare_parameter<std::string>("devSERV", "control_radar");
+        declare_parameter<std::string>("devSPUB", "radar_status");
+        declare_parameter<std::string>("devDPUB", "radar_data");
+        declare_parameter<std::string>("devLOGG", "radar: ");
+        devDPUB = get_parameter("devDPUB").as_string();
+
+        if (!loadConfig()) {
+          throw std::runtime_error("device config could not be loaded -- see the error above");
+        }
+        allocateRing();
+
+        // Publisher ---------------------------------------------------------------------------
+        // Best-effort, not reliable: with reliable QoS a slow subscriber blocks
+        // publish() and stalls this capture thread, so frames are lost at the
+        // socket while the published sequence stays contiguous. 
+        // The subscriber QoS in recorder.py must match.
         auto data_qos = rclcpp::QoS(rclcpp::KeepLast(100)).best_effort();
-        data_publisher = this->create_publisher<mmwave_drv::msg::Frame>(devDPUB, data_qos);
-        RCLCPP_INFO(this->get_logger(),"Device publishder started.");
-        RCLCPP_INFO(this->get_logger(),"Node Setup Finished.\n");
+        data_publisher = create_publisher<mmwave_drv::msg::Frame>(devDPUB, data_qos);
 
-        RCLCPP_INFO(this->get_logger(),"DATA CAPTURE THREAD:");
-        RCLCPP_INFO(this->get_logger(),"Starting data capture daemon.");
-        std::thread thr1(&MMWaveDataNode::publish_data_thread, this);
-        thr1.detach();
-        RCLCPP_INFO(this->get_logger(),"Daemon is running.\n");
+        std::thread(&MMWaveDataNode::capture_loop, this).detach();
+        RCLCPP_INFO(get_logger(), "Capture thread running.");
     }
 
   private:
+    // ---- config -------------------------------------------------------------------------------
+    bool loadConfig() {
+      std::string path = get_parameter("dev_cfg_file_path").as_string();
+      std::ifstream f(path);
+      if (!f) {
+        RCLCPP_ERROR(get_logger(), "cannot open device config %s", path.c_str());
+        return false;
+      }
+      Json::Value cfg;
+      Json::Reader reader;
+      if (!reader.parse(f, cfg)) {
+        // a malformed file gave a
+        // frame size of 0 and the node silently published nothing.
+        RCLCPP_ERROR(get_logger(), "device config %s does not parse: %s",
+                     path.c_str(), reader.getFormattedErrorMessages().c_str());
+        return false;
+      }
+      int numLoops   = cfg["frameCfg"]["numChirps"].asInt();
+      int numSamples = cfg["profileCfg"]["numAdcSamples"].asInt();
+      int iq         = (cfg["adcbufCfg"]["adcOutputFmt"].asInt() + 2) % 3;   // 0=complex -> 2, 1=real -> 1
+      int numRx      = maskToNum(cfg["channelCfg"]["rxChannelEn"].asInt());
+      int numTx      = cfg["frameCfg"]["chirpEndIndex"].asInt() - cfg["frameCfg"]["chirpStartIndex"].asInt() + 1;
+      if (numLoops <= 0 || numSamples <= 0 || iq <= 0 || numRx <= 0 || numTx <= 0) {
+        RCLCPP_ERROR(get_logger(), "device config %s gives a non-positive dimension "
+                     "(loops %d, samples %d, iq %d, rx %d, tx %d)",
+                     path.c_str(), numLoops, numSamples, iq, numRx, numTx);
+        return false;
+      }
+      size_t newFrame = (size_t)numLoops * numSamples * 2 * iq * numRx * numTx;
 
-    std::string devNAME;
-    std::string devSERV;
-    std::string devSPUB;
-    std::string devDPUB;
-    std::string devLOGG;
+      // Idle gap that marks a frame start: 40 % of the radar's quiet time per
+      // frame. The DCA1000's packet pacing stretches each burst past the chirps
+      // (lowfs: 0.54 ms of chirps, ~1.1 ms of packets at 25 us delay, 3 ms
+      // period), so the gap seen here is shorter than the radar's.
+      double chirpUs  = cfg["profileCfg"]["idleTime"].asDouble() + cfg["profileCfg"]["rampEndTime"].asDouble();
+      double periodUs = cfg["frameCfg"]["framePeriod"].asDouble() * 1000.0;
+      double quietUs  = periodUs - numLoops * numTx * chirpUs;
+      int64_t newGap  = quietUs >= 400.0 ? (int64_t)(0.4 * quietUs * 1000.0) : 0;
 
-    int collect_data(){
-        //Receive an incoming message
-        clientlen = sizeof(clientaddr);
-        bzero(incoming_udp_packet, BUFSIZE); // resets buffer
-        if (!softwareTest){
-          n = recvfrom(sockfd, incoming_udp_packet, BUFSIZE, 0,
-		      (struct sockaddr *) &clientaddr, &clientlen);
+      if (newFrame != frameSize || newGap != burstGapNs) {
+        RCLCPP_INFO(get_logger(), "Config %s: %d loops x %d Tx x %d Rx x %d samples -> frame %zu B",
+                    path.c_str(), numLoops, numTx, numRx, numSamples, newFrame);
+        if (newGap > 0) {
+          RCLCPP_INFO(get_logger(), "Burst phase: a gap over %.0f us marks a frame start "
+                      "(%.0f us quiet per %.0f us frame).", newGap / 1000.0, quietUs, periodUs);
         } else {
-          n = BUFSIZE;
-          unsigned char packet[MAX_PACKET_DATA_SIZE +10] = {0x00};
-          packetCount++;
-          for (int i =0; i < 4 ; i++){
-            packet[i] = (packetCount & (0x000000ff << i*8)) >> i*8;
-          }
-          memcpy(incoming_udp_packet,packet,sizeof(incoming_udp_packet));
+          RCLCPP_WARN(get_logger(), "Burst phase OFF: only %.0f us quiet per frame, too little "
+                      "to find frame starts by timing.", quietUs);
         }
-        if (n < 0){
-          RCLCPP_INFO(this->get_logger(),"Waiting for data...");
-          // Read config data ---------------------------------------------------------------------
-          {
-            // get jsons
-            Json::Reader reader;
-
-            std::string devCfgPath =this->get_parameter("dev_cfg_file_path").get_parameter_value().get<std::string>();
-            std::ifstream dev(devCfgPath);
-            Json::Value devCfgData;
-            reader.parse(dev, devCfgData);
-
-            // calculate parameters
-            int numChirps = devCfgData["frameCfg"]["numChirps"].asInt();
-            int numSamples = devCfgData["profileCfg"]["numAdcSamples"].asInt();
-            int bytesPerSample = 2; // adc either returns 12,14 or 16bit data which all have to be stored over 2 bytes 
-            int realOrComplex = (devCfgData["adcbufCfg"]["adcOutputFmt"].asInt()+2) % 3; //if 0 it is complex so 2%3 = 2, if 1 it is real 3%3=1
-            int numReceivers = maskToNum(devCfgData["channelCfg"]["rxChannelEn"].asInt()); // convert number to bit mask string with bin() and remove 0b from start of string
-            int numTransmitters = devCfgData["frameCfg"]["chirpEndIndex"].asInt() - devCfgData["frameCfg"]["chirpStartIndex"].asInt() + 1;
-            
-            frameSize = numChirps*numSamples*bytesPerSample*realOrComplex*numReceivers*numTransmitters; // calculate required buffer Size
-            
-            // Report what the previous stream left behind, once per idle
-            // period (after the first reset both are 0 and this is silent).
-            // A nonzero tail is the carry-over that rotates the next take's
-            // Tx order if it is not cleared -- and this line appearing at all
-            // proves the reset path runs between takes (15 Sep 2026).
-            if (bytesWritten != 0 || packetNum != 0) {
-              int chirpBytes = numSamples*bytesPerSample*realOrComplex*numReceivers;
-              RCLCPP_INFO(this->get_logger(),
-                  "Stream idle: resetting capture buffers. Unpublished tail %d B "
-                  "(%.2f chirps), last packet number %d.",
-                  bytesWritten, (double)bytesWritten / chirpBytes, packetNum);
-            }
-            // Free the previous run's buffers. This path fires every 2 s while
-            // the stream is idle, so without these it leaked both buffers on
-            // every timeout.
-            delete[] dataToPublish;
-            delete[] dataBuf;
-            dataToPublish = new unsigned char [frameSize];
-            memset(dataToPublish,0x00,frameSize);
-
-            // Create buffer
-            bufSize = frameSize*6;
-            dataBuf = new unsigned char[bufSize];
-            memset( dataBuf, 0, bufSize );
-            _readPtr = 0;
-            _writePtr = 0;
-            _writeBytesAvail = bufSize;
-            // bytesWritten counts unread bytes in the ring. It was NOT reset
-            // here, so the partial frame left over when the previous take
-            // stopped survived into the next take: the pointers restarted at 0
-            // but the count still said R bytes were waiting. Every frame of
-            // the next take was then published R bytes early, a permanent
-            // misalignment. The first take after a launch starts at 0, which
-            // is why only takes 2+ on a reused driver went wrong (15 Sep 2026).
-            bytesWritten = 0;
-            awaitingFirstPacket = true;
-            // The DCA1000 restarts its packet counter with the stream, so a
-            // stale prevPackNum here would compare against the previous
-            // run's numbering.
-            prevPackNum = 0;
-            packetNum = 0;
-            zeroPacketsInserted = 0;
-          }
-        } else {
-          //RCLCPP_INFO(this->get_logger(),"Received %s bytes." , std::to_string(n).c_str());
-          // get packet number
-          prevPackNum = packetNum; 
-          packetNum = 0;
-          for (int i = 0; i < 4 ;i++){
-            packetNum = packetNum | (incoming_udp_packet[i] << i*8);
-          }
-          //RCLCPP_INFO(this->get_logger(),"Received packet number %s.", std::to_string((packetNum)).c_str());
-          // Once per stream. The dropped-packet check below assumes the
-          // DCA1000 restarts its counter at every record start; this line is
-          // the evidence for or against that, and n shows the packet size
-          // the zero-fill assumes is MAX_PACKET_DATA_SIZE.
-          if (awaitingFirstPacket) {
-            awaitingFirstPacket = false;
-            RCLCPP_INFO(this->get_logger(),
-                "Stream started: first packet number %d, %d B, buffered tail %d B.",
-                packetNum, n, bytesWritten);
-          }
-
-          // Check for dropped packets and push zeros to buffer.
-          //
-          // The count is (packetNum - prevPackNum - 1), NOT the difference
-          // itself: consecutive packets differ by 1 and nothing is missing.
-          // Without the -1 every drop inserts one packet too many, which
-          // shifts the byte stream permanently and misaligns every frame
-          // boundary after the first drop. Downstream that reads as a
-          // rotation of the transmitter firing order, because the chirps of
-          // a frame are then attributed to the wrong Tx. That is the fault
-          // behind the ordering slip observed between 14:28 and 14:30 on
-          // 9 September 2026 -- see the session notes for that date.
-          if ((packetNum - prevPackNum) > 1){
-            int numZeroPackets = packetNum - prevPackNum - 1;
-            zeroPacketsInserted += numZeroPackets;
-            RCLCPP_WARN(this->get_logger(),
-                "Dropped %s packets (%s zero-filled so far this run). Frame "
-                "alignment is preserved but these frames carry zeros.",
-                std::to_string(numZeroPackets).c_str(),
-                std::to_string(zeroPacketsInserted).c_str());
-            unsigned char zeroBytes[MAX_PACKET_DATA_SIZE] = {0x00}; 
-            for(int i = 0; i<numZeroPackets;i++)
-            {
-              //frameBuf.Write(zeroBytes,MAX_PACKET_DATA_SIZE);
-              bufWrite(zeroBytes,MAX_PACKET_DATA_SIZE);
-              bytesWritten += MAX_PACKET_DATA_SIZE;
-            } 
-          } 
-
-          // Push raw data to buffer
-          // ISSUE HERE
-          //RCLCPP_INFO(this->get_logger(),"Captured %s bytes.", std::to_string((bytesWritten + n - 10)).c_str());
-          //frameBuf.Write(incoming_udp_packet+10,n-10); // Write the packet minus first 10 bytes to buffer
-          bufWrite(incoming_udp_packet+10,n-10);
-          bytesWritten += n-10;
-          //RCLCPP_INFO(this->get_logger(),"Pushed %s Bytes to buffer.", std::to_string((n-10)).c_str());
-        }
-
-        return 0;
+      }
+      frameSize = newFrame;
+      chirpBytes = (size_t)numSamples * 2 * iq * numRx;
+      burstGapNs = newGap;
+      return true;
     }
 
-    int bufWrite( unsigned char *dataPtr, int numBytes ) {
-      // Simultaneously keep track of how many bytes we've written and our position in the incoming buffer
-      //
-      // _writeBytesAvail was maintained but never read, so the ring buffer
-      // could lap the reader and overwrite unread bytes with no symptom
-      // other than corrupted frames much later. Writing anyway is the right
-      // behaviour -- dropping the newest data would be worse -- but it must
-      // be visible.
-      if(numBytes > _writeBytesAvail){
-        RCLCPP_ERROR(this->get_logger(),
-            "Ring buffer overflow: writing %s bytes with only %s free of %s. "
-            "The reader is not keeping up and frames are now corrupt.",
-            std::to_string(numBytes).c_str(),
-            std::to_string(_writeBytesAvail).c_str(),
-            std::to_string(bufSize).c_str());
-      }
-      if(numBytes > bufSize - _writePtr)
-      {		//std::cout<<"TRACE 5"<<std::endl;
-            int len = bufSize-_writePtr;
-            memcpy(dataBuf+_writePtr,dataPtr,len);
-            memcpy(dataBuf, dataPtr+len, numBytes-len);
-      }
-      else
-      {		
-          memcpy(dataBuf+_writePtr, dataPtr, numBytes);
-      }
-
-      _writePtr = (_writePtr + numBytes) % bufSize;
-      _writeBytesAvail -= numBytes;
-
-      return numBytes;
+    void allocateRing() {
+      ringSize = frameSize * RING_FRAMES;
+      ring.assign(ringSize, 0);
+      readPtr = writePtr = unread = 0;
+      RCLCPP_INFO(get_logger(), "Ring buffer: %zu B (%d frames).", ringSize, RING_FRAMES);
     }
 
-    int bufRead( unsigned char *dataPtr, int numBytes ) {
-      if(numBytes > bufSize - _readPtr)
-      {
-            int len = bufSize-_readPtr;
-            memcpy(dataPtr,dataBuf+_readPtr,len);
-            memcpy(dataPtr+len, dataBuf, numBytes-len);
-      }
-      else
-      {
-            memcpy(dataPtr, dataBuf+_readPtr, numBytes);
-      }
-
-      _readPtr = (_readPtr + numBytes) % bufSize;
-      _writeBytesAvail += numBytes;
-
-      return numBytes;
-    }
-
-    // %---------------------------------------------------------------------------------------------------------
-    void publish_data_thread()
-    {
-      RCLCPP_INFO(this->get_logger(),"DATA COLLECTION:");
-      for(;;){ publish_data(); }    
-    }
-
-
-    void publish_data()
-    {
-      collect_data();
-      // auto message = radar_interfaces::msg::Frame();
-      auto message = mmwave_drv::msg::Frame();
-
-      if (bytesWritten >= frameSize){
-        bufRead(dataToPublish,frameSize);
-        bytesWritten -= frameSize;
-        std::vector<unsigned char> data_vector(dataToPublish, dataToPublish + frameSize);
-        // Move, don't copy. Copy-assignment here duplicated the whole 24 kB frame
-        // a second time before DDS serialisation copied it again.
-        message.frame_data = std::move(data_vector);
-        message.frame_size = frameSize;
-        message.header.stamp = this->get_clock()->now();
-        message.header.set__frame_id(std::to_string(count));
-        count++;
-        // Do NOT log per frame here. run.sh pipes stdout through tee, so an
-        // RCLCPP_INFO on this path is a synchronous write into a pipe from the
-        // capture thread -- at 333 Hz that stalls the thread that should be
-        // draining the UDP socket, and surplus device frames are lost in the
-        // kernel buffer. Periodic only.
-        if (count % 500 == 0){
-          RCLCPP_INFO(this->get_logger(), "Published %d frames.", count);
-        }
-        data_publisher->publish(message);
-      }
-    }
-
-    int maskToNum(long n) {
-      long i;
-      int num = n;
+    static int maskToNum(int n) {
       int sum = 0;
-
-      for (i = 0; i <4 ; i++)
-      {
-        sum += num%2;
-        num = num/2;
-      }
+      for (int i = 0; i < 4; i++) { sum += n & 1; n >>= 1; }
       return sum;
     }
 
+    // ---- stream state -------------------------------------------------------------------------
+    void resetStream(const char *why) {
+      if (inStream || unread != 0) {
+        RCLCPP_INFO(get_logger(),
+            "Stream ended (%s): %llu B received, %llu B zero-filled, unpublished tail %zu B "
+            "(%.2f chirps), last packet %u.",
+            why, (unsigned long long)(expectedOffset - joinOffset),
+            (unsigned long long)zeroFilled, unread,
+            chirpBytes ? (double)unread / chirpBytes : 0.0, lastSeq);
+        logBurstPhase("Stream");
+      }
+      readPtr = writePtr = unread = 0;
+      inStream = false;
+      expectedOffset = joinOffset = alignSkip = zeroFilled = nextFrameOffset = 0;
+      lastSeq = 0;
+      lastPacketNs = 0;
+      burstCount = burstSlips = 0;
+      burstMin = INT64_MAX;
+      burstMax = INT64_MIN;
+      pendingBursts.clear();
+    }
+
+    // A packet after an idle gap starts a frame in the radar's stream.
+    void noteBurst(uint64_t byteCount) {
+      uint64_t k = (byteCount + frameSize / 2) / frameSize;
+      int64_t phase = (int64_t)byteCount - (int64_t)(k * frameSize);
+      // Held until that frame is published: the packet that starts frame k
+      // usually also completes frame k-1, so frame k is published later.
+      pendingBursts.emplace_back(k * frameSize, phase);
+      if (pendingBursts.size() > RING_FRAMES + 2) pendingBursts.pop_front();
+      burstCount++;
+      burstMin = std::min(burstMin, phase);
+      burstMax = std::max(burstMax, phase);
+      // Half a chirp: a part-filled packet held over (at most one packet,
+      // 1456 B) stays inside it for every profile with chirps over 2912 B.
+      if ((uint64_t)std::llabs(phase) >= chirpBytes / 2) {
+        if (++burstSlips == 1 || burstSlips % 100 == 0) {
+          RCLCPP_ERROR(get_logger(),
+              "Frame start at byte %llu is %lld B (%.2f chirps) off the frame grid: the stream is "
+              "NOT aligned to the radar's frames (%llu such bursts so far).",
+              (unsigned long long)byteCount, (long long)phase, (double)phase / chirpBytes,
+              (unsigned long long)burstSlips);
+        }
+      }
+    }
+
+    void logBurstPhase(const char *what) {
+      if (burstGapNs == 0) return;
+      if (burstCount == 0) {
+        RCLCPP_WARN(get_logger(), "%s: no frame starts found by timing (gap threshold %.0f us).",
+                    what, burstGapNs / 1000.0);
+        return;
+      }
+      RCLCPP_INFO(get_logger(), "%s: burst phase %lld..%lld B over %llu frame starts, %llu off-grid.",
+                  what, (long long)burstMin, (long long)burstMax,
+                  (unsigned long long)burstCount, (unsigned long long)burstSlips);
+    }
+
+    void startStream(uint32_t seq, uint64_t byteCount, int payload) {
+      inStream = true;
+      joinOffset = byteCount;
+      expectedOffset = byteCount;
+      alignSkip = (frameSize - byteCount % frameSize) % frameSize;
+      nextFrameOffset = byteCount + alignSkip;
+      lastSeq = seq;
+      if (byteCount == 0 && seq == 1) {
+        RCLCPP_INFO(get_logger(), "Stream started: packet 1 at byte 0, %d B payload. Aligned.", payload);
+      } else {
+        // Either packets were lost before this one, or the card's counters did
+        // not restart. Byte counts still place everything exactly; only the
+        // partial frame before the next boundary is discarded.
+        RCLCPP_WARN(get_logger(),
+            "Stream started LATE: first packet %u at byte %llu (%.2f frames in). "
+            "Discarding %llu B to the next frame boundary.",
+            seq, (unsigned long long)byteCount, (double)byteCount / frameSize,
+            (unsigned long long)alignSkip);
+      }
+    }
+
+    // Append stream bytes, honouring the pending alignment skip.
+    void feed(const unsigned char *data, size_t len) {
+      if (alignSkip > 0) {
+        size_t k = std::min<uint64_t>(alignSkip, len);
+        data += k;
+        len -= k;
+        alignSkip -= k;
+      }
+      if (len > 0) ringWrite(data, len);
+    }
+
+    void feedZeros(uint64_t count) {
+      static const unsigned char zeros[MAX_PACKET_DATA_SIZE] = {0};
+      while (count > 0) {
+        size_t k = std::min<uint64_t>(count, sizeof(zeros));
+        feed(zeros, k);
+        count -= k;
+      }
+    }
+
+    void ringWrite(const unsigned char *data, size_t len) {
+      // If the publisher has fallen behind, drop the OLDEST whole frames. That
+      // keeps every remaining frame aligned, and the jump in stream_offset tells
+      // the recorder exactly what was lost. (The old buffer overwrote unread
+      // bytes mid-frame.)
+      while (unread + len > ringSize && unread >= frameSize) {
+        readPtr = (readPtr + frameSize) % ringSize;
+        unread -= frameSize;
+        nextFrameOffset += frameSize;
+        if (++overflowFrames % 100 == 1) {
+          RCLCPP_ERROR(get_logger(), "Ring buffer full: dropped oldest frame (%llu so far).",
+                       (unsigned long long)overflowFrames);
+        }
+      }
+      size_t first = std::min(len, ringSize - writePtr);
+      std::memcpy(ring.data() + writePtr, data, first);
+      std::memcpy(ring.data(), data + first, len - first);
+      writePtr = (writePtr + len) % ringSize;
+      unread += len;
+    }
+
+    // ---- capture ------------------------------------------------------------------------------
+    void capture_loop() {
+      for (;;) {
+        receive_packet();
+        publish_ready();
+      }
+    }
+
+    void receive_packet() {
+      struct iovec iov;
+      iov.iov_base = packet;
+      iov.iov_len = sizeof(packet);
+      alignas(struct cmsghdr) char ctrl[CMSG_SPACE(sizeof(struct timespec))];
+      struct msghdr mh;
+      std::memset(&mh, 0, sizeof(mh));
+      mh.msg_iov = &iov;
+      mh.msg_iovlen = 1;
+      mh.msg_control = ctrl;
+      mh.msg_controllen = sizeof(ctrl);
+      ssize_t n = recvmsg(sockfd, &mh, MSG_TRUNC);
+      if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          // Idle. End any stream, and pick up a changed config while nothing
+          // is flowing (this path used to leak both buffers on every timeout).
+          resetStream("idle 2 s");
+          size_t before = frameSize;
+          if (loadConfig() && frameSize != before) allocateRing();
+        } else {
+          RCLCPP_ERROR(get_logger(), "recvfrom failed: %s", strerror(errno));
+        }
+        return;
+      }
+      if ((size_t)n > sizeof(packet)) {
+        RCLCPP_ERROR(get_logger(), "Datagram of %zd B truncated to %zu B -- packet size config "
+                     "does not match; data is now misaligned.", n, sizeof(packet));
+        n = sizeof(packet);
+      }
+      if (n <= HEADER_BYTES) return;
+      int64_t tNs = receiveTimeNs(mh);
+
+      uint32_t seq = 0;
+      for (int i = 0; i < 4; i++) seq |= (uint32_t)packet[i] << (8 * i);
+      uint64_t byteCount = 0;
+      for (int i = 0; i < 6; i++) byteCount |= (uint64_t)packet[4 + i] << (8 * i);
+      size_t payload = (size_t)n - HEADER_BYTES;
+
+      // A new stream without an idle gap in between: the card restarts both
+      // counters at RECORD_START. Byte 0 arriving mid-stream marks it; so does
+      // the sequence number jumping back by more than 64 packets (~2 frames),
+      // which also catches a restart whose first packet was lost. A single
+      // reordered packet is only a few packets behind and is not taken for one.
+      bool restarted = inStream &&
+          ((byteCount == 0 && expectedOffset > 0) ||
+           byteCount < joinOffset ||
+           (uint64_t)seq + 64 < lastSeq);
+      if (restarted) {
+        resetStream("counters restarted");
+      }
+      if (!inStream) startStream(seq, byteCount, (int)payload);
+
+      // The first packet of a stream has no previous packet to time against;
+      // a duplicate or reordered packet is not a burst start.
+      if (burstGapNs > 0 && lastPacketNs != 0 && byteCount >= expectedOffset &&
+          tNs - lastPacketNs > burstGapNs) {
+        noteBurst(byteCount);
+      }
+      lastPacketNs = tNs;
+
+      if (byteCount > expectedOffset) {
+        uint64_t gap = byteCount - expectedOffset;
+        zeroFilled += gap;
+        RCLCPP_WARN(get_logger(),
+            "Dropped packets %u..%u: zero-filling exactly %llu B (%llu B so far this stream).",
+            lastSeq + 1, seq - 1, (unsigned long long)gap, (unsigned long long)zeroFilled);
+        feedZeros(gap);
+      } else if (byteCount < expectedOffset) {
+        RCLCPP_WARN(get_logger(), "Packet %u at byte %llu is behind the stream (expected %llu): "
+                    "duplicate or reordered, dropped.", seq,
+                    (unsigned long long)byteCount, (unsigned long long)expectedOffset);
+        return;
+      }
+      feed(packet + HEADER_BYTES, payload);
+      expectedOffset = byteCount + payload;
+      lastSeq = seq;
+    }
+
+    void publish_ready() {
+      while (unread >= frameSize) {
+        auto message = mmwave_drv::msg::Frame();
+        message.frame_data.resize(frameSize);
+        size_t first = std::min(frameSize, ringSize - readPtr);
+        std::memcpy(message.frame_data.data(), ring.data() + readPtr, first);
+        std::memcpy(message.frame_data.data() + first, ring.data(), frameSize - first);
+        readPtr = (readPtr + frameSize) % ringSize;
+        unread -= frameSize;
+
+        message.frame_size = frameSize;
+        message.stream_offset = nextFrameOffset;
+        message.join_offset = joinOffset;
+        message.zero_filled = zeroFilled;
+        message.burst_phase = INT32_MIN;
+        while (!pendingBursts.empty() && pendingBursts.front().first < nextFrameOffset) {
+          pendingBursts.pop_front();
+        }
+        if (!pendingBursts.empty() && pendingBursts.front().first == nextFrameOffset) {
+          message.burst_phase = (int32_t)std::max<int64_t>(
+              std::min<int64_t>(pendingBursts.front().second, INT32_MAX), INT32_MIN + 1);
+          pendingBursts.pop_front();
+        }
+        nextFrameOffset += frameSize;
+        message.header.stamp = get_clock()->now();
+        message.header.frame_id = std::to_string(count);
+        count++;
+        // Periodic only: a per-frame RCLCPP_INFO here is a synchronous write
+        // into run.sh's tee pipe and stalls the thread draining the socket.
+        if (count % 500 == 0) {
+          RCLCPP_INFO(get_logger(), "Published %llu frames.", (unsigned long long)count);
+          logBurstPhase("  so far");
+        }
+        data_publisher->publish(std::move(message));
+      }
+    }
+
+    int64_t receiveTimeNs(const struct msghdr &mh) {
+      if (kernelStamps) {
+        for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(const_cast<struct msghdr *>(&mh), c)) {
+          if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_TIMESTAMPNS) {
+            struct timespec ts;
+            std::memcpy(&ts, CMSG_DATA(c), sizeof(ts));
+            return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+          }
+        }
+      }
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    }
+
     // ROS2
-    rclcpp::TimerBase::SharedPtr timer_;
-    // rclcpp::Publisher<radar_interfaces::msg::Frame>::SharedPtr data_publisher;
+    std::string devDPUB;
     rclcpp::Publisher<mmwave_drv::msg::Frame>::SharedPtr data_publisher;
+    unsigned long long count = 0;
 
-    int count;
-    const bool softwareTest = false;
-    int packetCount = 0;
+    // Frame geometry
+    size_t frameSize = 0;
+    size_t chirpBytes = 0;
 
-    //Threading 
-    std::thread thr1;
+    // Ring buffer
+    std::vector<unsigned char> ring;
+    size_t ringSize = 0, readPtr = 0, writePtr = 0, unread = 0;
+    unsigned long long overflowFrames = 0;
 
-    // Buffer
-    int frameSize;
-    unsigned char * dataToPublish;
-    unsigned char * dataBuf;
-    int _readPtr;
-    int _writePtr;
-    int _writeBytesAvail;
-    int bufSize;
-    RingBuffer frameBuf;
-    
+    // Stream state, all in DCA1000 byte-count coordinates
+    bool inStream = false;
+    uint32_t lastSeq = 0;
+    uint64_t expectedOffset = 0;   // position of the next byte we expect
+    uint64_t joinOffset = 0;       // byte count of the first packet of this stream
+    uint64_t alignSkip = 0;        // bytes still to discard before the first frame boundary
+    uint64_t nextFrameOffset = 0;  // stream position of the next frame to publish
+    uint64_t zeroFilled = 0;       // bytes zero-filled for dropped packets, this stream
 
-    // Data Collection Variables
-    int packetNum = 0;
-    // Initialised, and reset alongside the buffer pointers on a config
-    // reload. Left indeterminate it feeds the dropped-packet comparison on
-    // the very first packet of a run.
-    int prevPackNum = 0;
-    int bytesWritten = 0;
-    // Cumulative zero packets inserted this run. Zero-filling keeps frame
-    // alignment but the samples are fabricated, so a capture with a nonzero
-    // count here has holes in it and the number belongs in the log.
-    long zeroPacketsInserted = 0;
-    // True from launch and after every idle reset, until the next packet.
-    bool awaitingFirstPacket = true;
+    // Burst phase (frame starts found by packet timing), this stream
+    bool kernelStamps = false;
+    int64_t burstGapNs = 0;        // idle gap that marks a frame start; 0 = check off
+    int64_t lastPacketNs = 0;      // receive time of the previous packet; 0 = none yet
+    // Timed frame starts not yet published: (frame-grid position, byte count minus it)
+    std::deque<std::pair<uint64_t, int64_t>> pendingBursts;
+    uint64_t burstCount = 0, burstSlips = 0;
+    int64_t burstMin = INT64_MAX, burstMax = INT64_MIN;
 
-    // Socket Variables
-    int sockfd; /* Socket file descriptor number */
-    socklen_t clientlen; /* byte size of client's address */
-    struct sockaddr_in serveraddr; /* server's address */
-    struct sockaddr_in clientaddr; /* clients addréss */
-    struct hostent *hostp; /* client host info */
-    unsigned char incoming_udp_packet[BUFSIZE]; /* Buffer for incoming packets*/
-    char *hostaddrp; /* dotted decimal host addr string */
-    int optval; /* flag value for setsockopt */
-    int n; /* message byte size */
-
+    // Socket
+    int sockfd = -1;
+    unsigned char packet[RECV_PACKET_BUF];
 };
 
 void signal_callback_handler(int signum) {
-   std::cout << "Ending data collection." <<  std::endl;
+   std::cout << "Ending data collection." << std::endl;
    exit(signum);
 }
 
@@ -484,7 +521,6 @@ int main(int argc, char * argv[])
 {
   signal(SIGINT, signal_callback_handler);
   rclcpp::init(argc, argv);
-
   rclcpp::Node::SharedPtr node = std::make_shared<MMWaveDataNode>();
   rclcpp::executors::MultiThreadedExecutor executor;
   executor.add_node(node);

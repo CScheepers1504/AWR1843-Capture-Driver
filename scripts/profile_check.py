@@ -5,11 +5,6 @@ Derive and constraint-check an AWR1843 chirp profile from its config JSON.
     python3 profile_check.py ../src/mmWave_DRV/config/awr1843_wideband.json
     python3 profile_check.py <old.json> <new.json>      # side-by-side
 
-Nothing here is hardcoded from a design note: every figure is computed from the
-JSON the driver actually loads, for the same reason monitor.sh reads the frame
-size out of the config instead of trusting a constant. If the profile is edited,
-re-run this rather than trusting numbers written down elsewhere.
-
 The four constraints that bind, in the order they bite:
 
   1. BAND      slope * rampEndTime must fit inside 77-81 GHz.
@@ -19,17 +14,11 @@ The four constraints that bind, in the order they bite:
                up -- not VCO settling.
   4. MIGRATION the ball must not cross much more than one range bin during the
                chirp burst, or the range peak smears across bins.
-  5. HPF       the signal must land ABOVE the IF high-pass corner. In FMCW that
-               sets a minimum usable range; in CW, where the beat frequency IS
-               the Doppler shift, it sets a minimum usable SPEED. The corners
-               are cascaded, so the higher of the two binds.
+  5. HPF       the signal must land ABOVE the IF high-pass corner.
 
 freqSlopeConst = 0 selects CW: a constant tone, no range information, and the
 "range FFT" becomes a Doppler FFT over the ADC dwell. Range-derived figures are
 suppressed in that mode rather than divided by zero.
-
-LVDS_GBPS is a DEVICE ASSUMPTION (xWR18xx: 2 lanes, 600 Mbps DDR each).
-Verify against the datasheet before trusting constraint 3.
 """
 import json
 import math
@@ -39,7 +28,11 @@ INF = float("inf")
 
 C = 299792458.0
 BAND_LO_GHZ, BAND_HI_GHZ = 77.0, 81.0
-LVDS_GBPS = 1.2          # xWR18xx: 2 lanes x 600 Mbps. VERIFY.
+# A chirp must sweep within ONE synthesizer VCO: 76-78 GHz (VCO1) or 77-81 GHz
+# (VCO2). mmwavelink rl_sensor.h, rlProfileCfg.rampEndTime, SDK 03.06.02.
+# So a 76 GHz start allows at most 2 GHz; more than 2 GHz needs >= 77 GHz.
+VCO_BANDS_GHZ = ((76.0, 78.0), (77.0, 81.0))
+LVDS_GBPS = 1.2          # xWR18xx: 2 lanes x 600 Mbps.
 LVDS_DERATE = 0.90       # headroom for framing / inter-chirp overhead
 ADCBUF_BYTES = 32768     # xWR18xx ADC buffer, shared across Rx
 
@@ -179,9 +172,11 @@ def report(cfg, d, label):
         state["ok"] = state["ok"] and cond
         print("    [%s] %-12s %s" % ("ok " if cond else "FAIL", name, detail))
 
-    chk("band",
-        d["f_stop_ghz"] <= BAND_HI_GHZ + 1e-9 and d["f_start_ghz"] >= BAND_LO_GHZ - 1e-9,
-        "stops at %.2f GHz, limit %.0f GHz" % (d["f_stop_ghz"], BAND_HI_GHZ))
+    in_vco = [lo for lo, hi in VCO_BANDS_GHZ
+              if d["f_start_ghz"] >= lo - 1e-9 and d["f_stop_ghz"] <= hi + 1e-9]
+    chk("band", bool(in_vco),
+        "sweeps %.2f-%.2f GHz; must lie within 76-78 or 77-81 GHz (one VCO)"
+        % (d["f_start_ghz"], d["f_stop_ghz"]))
     chk("adc window", d["t_adc_end_us"] <= d["ramp_us"] + 1e-9,
         "ADC ends %.2f us, ramp ends %.2f us (guard %.2f us)"
         % (d["t_adc_end_us"], d["ramp_us"], d["ramp_us"] - d["t_adc_end_us"]))

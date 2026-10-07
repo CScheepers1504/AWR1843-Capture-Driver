@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Push the laptop working tree to the Jetson. ONE-WAY: this script never pulls.
+# Push the laptop working tree to the Jetson. ONE-WAY -> this script never pulls.
 #
-# The laptop is the source of truth; the Jetson is a deployment target only.
+# The laptop is the source of truth and the Jetson is a deployment target only.
 # Written after a vscode-sftp pull silently truncated all 25 source files to
 # zero bytes and that state was committed over the only good copies. The
 # zero-byte guard below exists to make that failure mode un-repeatable outbound.
@@ -19,12 +19,10 @@
 set -euo pipefail
 
 REMOTE="${REMOTE:-mmwave@192.168.33.30}"
-# Laptop and Jetson layouts are deliberately identical: <root>/{src,scripts,docker}.
-# The Jetson briefly carried an extra Sports-Ball-Tracker/ level (commit 1f128a6),
-# which broke every hardcoded path in scripts/ and radar_config.yaml. Keep these
-# two layouts in step.
+# Laptop and Jetson layouts are deliberately identical: <root>/{src,scripts}.
+
 REMOTE_PATH="${REMOTE_PATH:-/home/mmwave/ssd/chris-launch-monitor}"
-PATHS=(src scripts docker)
+PATHS=(src scripts)
 
 # Files that must be executable on the Jetson. The Windows filesystem reports
 # every file as mode 777 over DrvFs, so the real exec bits do not survive the
@@ -32,7 +30,6 @@ PATHS=(src scripts docker)
 # "missing executable bits on node scripts" defect inherited from the 2024 code.
 EXEC_GLOBS=(
     'scripts/*.sh'
-    'docker/*.sh'
     'src/mmWave_DRV/src/python/*.py'
 )
 

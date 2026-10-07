@@ -61,7 +61,6 @@ class MMWaveControlNode(Node):
     # Sockets and Ports
     dca_cmd_addr = ('192.168.33.180',4096)      # address to send commands to
     dca_rcv_addr = ('192.168.33.30', 4096)      # address to receive command responses from
-    ser_cmd_addr = ('137.158.125.136', 8080)    # address of the serial server device
     dca_socket = None                           # socket variable for the command port
 
     # configs
@@ -164,14 +163,7 @@ class MMWaveControlNode(Node):
     :param int toggle: toggle is either a 1 or 0. 1 starts recording and 0 stops recording
     :raises AnyError: raises error and exits program execution if error response was received from startSensor or startRecord command
     """
-        # errDEV_ and errDCA_ were set once and NEVER cleared, so a single
-        # failed command poisoned every later response: after one "Error -54"
-        # on START, the STOP that followed reported status=False even though
-        # sensorStop had succeeded. The flags are meant to describe THIS
-        # command, not the process history -- so clear them on entry.
-        # errDCA_ doubles as the "socket never opened" guard, so only clear it
-        # when there is in fact a socket (setup_DCA1000 now checks the socket
-        # directly).
+
         self.errDEV_ = False
         if self.dca_socket is not None:
             self.errDCA_ = False
@@ -195,8 +187,19 @@ class MMWaveControlNode(Node):
 
             if (request.command == request.START):
                 self.get_logger().info("Received START Request from Client.")
-                self.dca_socket.sendto(self.dca_cfg_cmd['RECORD_START_CMD_CODE'], self.dca_cmd_addr)
-                self.response_DCA1000('RECORD_START_CMD_CODE')
+
+                # The card must be armed BEFORE the radar chirps. This used to
+                # send RECORD_START, ignore whether it was acknowledged, and
+                # send sensorStart regardless. An unarmed card then either
+                # never streams (a 0 MB/s fault) or arms late and joins the
+                # stream mid-frame, which misaligns the whole take.
+                if not self.dca_command('RECORD_START_CMD_CODE'):
+                    self.errDCA_ = True
+                    self.get_logger().error(
+                        "DCA1000 did not acknowledge RECORD_START: NOT starting the sensor.")
+                    self.display_Status()
+                    response.status = False
+                    return response
 
                 if self.send_Request(self.dev_cpt_cmd[request.START]):
 
@@ -207,22 +210,22 @@ class MMWaveControlNode(Node):
                     return response
                 else:
 
-                    self.get_logger().error("Error setting up recording. Please restart the system")
+                    self.get_logger().error("sensorStart failed; disarming the DCA1000.")
                     self.errDEV_ = True
+                    self.dca_command('RECORD_STOP_CMD_CODE')
 
-            elif (request.command == request.STOP):     
-                self.get_logger().info("Received STOP Request from Client.")   
+            elif (request.command == request.STOP):
+                self.get_logger().info("Received STOP Request from Client.")
 
-                if self.send_Request(self.dev_cpt_cmd[request.STOP]):
-
-                    self.dca_socket.sendto(self.dca_cfg_cmd['RECORD_STOP_CMD_CODE'], self.dca_cmd_addr)
-                    self.response_DCA1000('RECORD_STOP_CMD_CODE')
+                if not self.send_Request(self.dev_cpt_cmd[request.STOP]):
+                    self.errDEV_ = True
+                # Disarm the card even if sensorStop failed (it may already
+                # have been stopped), so the next take starts from a clean card.
+                if not self.dca_command('RECORD_STOP_CMD_CODE'):
+                    self.errDCA_ = True
+                if not self.errDEV_:
                     self.devFLAGS_["RECRD"] = False
                     self.get_logger().info("Radar has stopped recording. Ready for next record session.\n")
-
-                else:
-
-                    self.errDEV_ = True
             
             self.display_Status()
             response.status = (not self.errDEV_) and (not self.errDCA_)
@@ -272,8 +275,9 @@ class MMWaveControlNode(Node):
             ]
 
         for cmd in cfgCmdList:
-            self.dca_socket.sendto(self.dca_cfg_cmd[cmd], self.dca_cmd_addr)
-            self.response_DCA1000(cmd)
+            if not self.dca_command(cmd):
+                self.errDCA_ = True
+                break
 
         if self.errDCA_:
             self.get_logger().error("DCA1000 setup failed: One or more config commands failed.")
@@ -281,12 +285,8 @@ class MMWaveControlNode(Node):
             self.cfgDCA_ = True
 
     def setup_RADAR(self):
-        """Performs setup of radar using a ROS2 service. 
-    This ROS node was developed for use with the Nvidia Jetson Orin. The Orin has a driver
-    issue that prevents usb communications with the radar. As such the Orin needs to send the
-    commands to another computer of network using tcp protocol. This function calls a ROS2
-    TCP service to send strings to the external computer (server).
-    :raises AnyError: raises errors if setup commands failed
+        """Sends the profile to the radar's CLI over the USB serial port (ser_addr),
+    one command at a time, starting with flushCfg. Sets cfgDEV_ on success.
     """
 
 
@@ -305,37 +305,73 @@ class MMWaveControlNode(Node):
             self.get_logger().error("Radar Device setup failed: One or more config commands failed.")
             
     # %---------------------------------------------------------------------------------------------------------
-    def response_DCA1000(self, cmd):
-        """ Helper function to listen for given command response from DCA1000. 
-        Will wait for command response. Can cause program to hang if acknowledgement packet is missed. 
-        Sets the DCA1000 error flag to true if status is 1. 
-        :param string cmd: Name of the command sent to DCA1000 and waiting for response. 
-        """
-        self.get_logger().info("Waiting for " + cmd)
+    def _flush_dca_socket(self):
+        """Discard anything already waiting on the command socket: late replies
+        to earlier commands and the card's asynchronous status packets."""
+        self.dca_socket.setblocking(False)
+        stale = 0
+        try:
+            while True:
+                self.dca_socket.recvfrom(2048)
+                stale += 1
+        except (BlockingIOError, socket.error):
+            pass
+        finally:
+            self.dca_socket.setblocking(True)
+        if stale:
+            self.get_logger().info("Discarded %d stale DCA1000 packet(s) before the next command." % stale)
 
-        received = False
-        timeoutCount = 0
-        status=1
-        while (not received) and (timeoutCount<=5):
-            try:
-                msg, server = self.dca_socket.recvfrom(2048)
-                (status,) = struct.unpack('<H', msg[4:6])
-                received = True
-            except Exception as e:
-                self.get_logger().error(cmd + " Failed With Exception: " + str(e))
-                timeoutCount += 1
-                continue
+    def dca_command(self, cmd, timeout=2.0, tries=2) -> bool:
+        """Send one DCA1000 command and wait for ITS acknowledgement.
 
-        if status == 0:
-            self.get_logger().info(cmd + " was successful.\n")
-        else:
-            self.get_logger().error(cmd + " was unsuccessful.")
-            self.get_logger().error("Received Following Status: " + str(status) + "\n")
-            self.errDCA_ = True
+    Reply format: 0xA55A header, 2-byte command code (echo), 2-byte status
+    (0 = success), 0xEEAA footer. The previous helper took the first packet on
+    the socket as the reply to whatever had just been sent and never checked
+    the echoed code, so a late reply to an earlier command could pass for this
+    one. Replies are now matched on the command code; anything else is logged
+    and skipped.
+
+    :returns: True only if a matching reply with status 0 arrived.
+    """
+        pkt = self.dca_cfg_cmd[cmd]
+        (code,) = struct.unpack('<H', pkt[2:4])
+        for attempt in range(1, tries + 1):
+            self._flush_dca_socket()
+            self.dca_socket.sendto(pkt, self.dca_cmd_addr)
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.dca_socket.settimeout(remaining)
+                try:
+                    msg, _ = self.dca_socket.recvfrom(2048)
+                except socket.timeout:
+                    break
+                if len(msg) < 6 or msg[0:2] != b"\x5a\xa5":
+                    self.get_logger().warn("Ignoring malformed DCA1000 packet (%d B) while waiting for %s."
+                                           % (len(msg), cmd))
+                    continue
+                rcode, status = struct.unpack('<HH', msg[2:6])
+                if rcode != code:
+                    self.get_logger().warn("Ignoring DCA1000 reply to command 0x%04x (status %d) while "
+                                           "waiting for %s (0x%04x)." % (rcode, status, cmd, code))
+                    continue
+                if status == 0:
+                    self.get_logger().info(cmd + " acknowledged.")
+                    return True
+                self.get_logger().error("%s rejected by the DCA1000, status %d (attempt %d/%d)."
+                                        % (cmd, status, attempt, tries))
+                break
+            self.get_logger().warn("%s: no successful acknowledgement within %.1f s (attempt %d/%d)."
+                                   % (cmd, timeout, attempt, tries))
+        self.dca_socket.settimeout(1)
+        self.get_logger().error(cmd + " FAILED.")
+        return False
 
     def send_Request(self, cmd) ->bool:
         '''
-        This function sends a request or array of requests to the radar serial port.
+        Sends a request or array of requests to the radar serial port.
         The requests must be in the TI string format.
         To work properly, both the device_type and ser_addr class variables must be set correctly.
         
@@ -422,7 +458,7 @@ class MMWaveControlNode(Node):
         config = mmWaveConfig(self.device_type, dev_cfg_path)
 
         if config.mmwaveParamDict == None:
-            raise ValueError("Invalid dev config")
+            raise ValueError("Invalid dev config %s: %s" % (dev_cfg_path, config.error))
 
         for cmd_key in list(config.mmwaveParamDict.keys()):
             
@@ -448,8 +484,7 @@ def main(args=None):
         # stop radar
         node.send_Request(node.dev_cpt_cmd[0])
         # stop dca
-        node.dca_socket.sendto(node.dca_cfg_cmd['RECORD_STOP_CMD_CODE'], node.dca_cmd_addr)
-        node.response_DCA1000('RECORD_STOP_CMD_CODE')
+        node.dca_command('RECORD_STOP_CMD_CODE')
 
         node.destroy_node()
     rclpy.shutdown()

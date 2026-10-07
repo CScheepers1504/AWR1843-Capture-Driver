@@ -69,7 +69,26 @@ class Recorder(Node):
 
         self.bin_f = open(os.path.join(session_dir, "frames.bin"), "wb")
         self.idx_f = open(os.path.join(session_dir, "index.csv"), "w")
-        self.idx_f.write("seq,ros_stamp_ns,wall_time_s,byte_offset,byte_len\n")
+        self.idx_f.write("seq,ros_stamp_ns,wall_time_s,byte_offset,byte_len,stream_offset,burst_phase\n")
+
+        # Alignment, from the stream_offset the data node stamps on every frame
+        # (DCA1000 byte count of the frame's first byte). Aligned frames sit at
+        # multiples of frame_bytes; consecutive frames differ by exactly one
+        # frame_bytes unless frames were dropped in the node.
+        self.first_stream_offset = None
+        self.last_stream_offset = None
+        self.join_offset = None
+        self.zero_filled = 0
+        self.misaligned = 0
+        self.stream_gaps = 0
+        self.stream_frames_skipped = 0
+        self.stream_restarts = 0
+        # Frame starts timed by the data node from the idle gap between packet
+        # bursts (burst_phase, bytes; INT32_MIN = not timed). A slipped take
+        # shows phases near a multiple of the chirp size instead of near 0.
+        self.burst_phases = []
+        self.burst_warned = False
+        self.chirp_bytes = dims["n_samples"] * dims["bytes_per_sample"] * dims["iq"] * dims["n_rx"]
 
         self.offset = 0
         self.count = 0
@@ -181,9 +200,37 @@ class Recorder(Node):
                     self.get_logger().warn("Sequence gap: %s -> %s" % (self.last_seq, seq))
             self.last_seq = seq
 
+        so = getattr(msg, "stream_offset", None)
+        if so is not None:
+            fb = self.dims["frame_bytes"]
+            if so % fb != 0:
+                self.misaligned += 1
+                if self.misaligned == 1:
+                    self.get_logger().error("Frame at stream offset %d is NOT on a frame boundary." % so)
+            if self.last_stream_offset is None:
+                self.first_stream_offset = so
+            elif so < self.last_stream_offset:
+                self.stream_restarts += 1
+                self.get_logger().error("Stream restarted mid-take (offset %d -> %d)." % (self.last_stream_offset, so))
+            elif so != self.last_stream_offset + fb:
+                self.stream_gaps += 1
+                self.stream_frames_skipped += (so - self.last_stream_offset) // fb - 1
+            self.last_stream_offset = so
+            self.join_offset = msg.join_offset
+            self.zero_filled = msg.zero_filled
+        bp = getattr(msg, "burst_phase", None)
+        if bp is not None and bp != -2147483648:
+            self.burst_phases.append(bp)
+            if abs(bp) * 2 >= self.chirp_bytes and not self.burst_warned:
+                self.burst_warned = True
+                self.get_logger().error("Frame start %d B (%.2f chirps) off the frame grid: "
+                                        "Tx slot order NOT trustworthy." % (bp, bp / self.chirp_bytes))
+
         stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
         self.bin_f.write(data)
-        self.idx_f.write("%d,%d,%.6f,%d,%d\n" % (seq, stamp_ns, now, self.offset, n))
+        self.idx_f.write("%d,%d,%.6f,%d,%d,%s,%s\n" % (seq, stamp_ns, now, self.offset, n,
+                                                      "" if so is None else so,
+                                                      "" if bp is None or bp == -2147483648 else bp))
         self.offset += n
         self.count += 1
 
@@ -197,6 +244,25 @@ class Recorder(Node):
         if self.max_frames and self.count >= self.max_frames:
             self.get_logger().info("Reached --max-frames, stopping.")
             raise SystemExit(0)
+
+    def burst_summary(self):
+        """Frame-start timing check. burst_slips counts frame starts more than half
+        a chirp off the frame grid; on an aligned take it is 0 and burst_phase_min/max
+        sit between minus one packet (-1456) and 0."""
+        chirp = self.chirp_bytes
+        p = sorted(self.burst_phases)
+        if not p:
+            return {"burst_timed_frames": 0, "burst_slips": None}
+        slips = sum(1 for v in p if abs(v) * 2 >= chirp)
+        return {
+            "burst_timed_frames": len(p),
+            "burst_timed_fraction": round(len(p) / self.count, 3) if self.count else None,
+            "burst_phase_min": p[0],
+            "burst_phase_median": p[len(p) // 2],
+            "burst_phase_max": p[-1],
+            "burst_phase_chirps": round(p[len(p) // 2] / chirp, 2),
+            "burst_slips": slips,
+        }
 
     def close(self):
         self.bin_f.close()
@@ -223,7 +289,18 @@ class Recorder(Node):
             "seq_unparsed": self.seq_unparsed,
             "payload_kind": self.payload_kind,
             "size_mismatches": self.size_mismatch,
+            # Frame alignment (data node stream offsets). aligned = every frame
+            # on a frame boundary of the DCA1000 stream; join_offset 0 = the node
+            # saw this stream from its first byte.
+            "aligned": (self.misaligned == 0) if self.first_stream_offset is not None else None,
+            "first_stream_offset": self.first_stream_offset,
+            "join_offset": self.join_offset,
+            "zero_filled_bytes": self.zero_filled,
+            "stream_gaps": self.stream_gaps,
+            "stream_frames_skipped": self.stream_frames_skipped,
+            "stream_restarts": self.stream_restarts,
         }
+        summary.update(self.burst_summary())
         path = os.path.join(self.session_dir, "meta.json")
         with open(path) as f:
             meta = json.load(f)

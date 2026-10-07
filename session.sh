@@ -2,15 +2,15 @@
 #
 # One command: deploy -> build -> launch -> SETUP/START -> record -> STOP -> pull.
 #
-#   wsl.exe -e bash session.sh swipe_01 "hand swipe at 2.3 m"
-#   wsl.exe -e bash session.sh walk_01  "walking past at 1.4 m/s" --frames 3000
+#   wsl.exe -e bash session.sh [folder name] "[comment]"
+#   wsl.exe -e bash session.sh [folder name]  "[comment]" --frames [number of frames]
 #
-# THE POINT: the driver is left running between takes. The first invocation
-# pays for deploy + build + launch (~40 s); every take after that is just
-# record + pull (~5 s). Use --restart only when you have changed code, and
+# The driver is left running between takes. The first run
+# pays for deploy + build + launch. Every take after that is just
+# record + pull. Use --restart only when you have changed code, and
 # --clean only when a .msg has changed.
 #
-#   --frames N     max frames to record        (default 2000, ~6 s at 333 Hz)
+#   --frames N     max frames to record        (default 2000)
 #   --restart      redeploy, rebuild, relaunch even if the driver is up
 #   --clean        wipe build/install/log first (REQUIRED after a .msg change)
 #   --no-deploy    skip the file push
@@ -25,8 +25,7 @@
 #
 # Environment overrides: REMOTE, REMOTE_PATH, CAPTURES, DEST.
 #
-# FAILURE HANDLING (13 Sep 2026). Takes were hanging, poisoning the take after
-# them, or recording silently wrong data, through failures nothing reported:
+# FAILURE HANDLING 
 #   1. A failed STOP was ignored (`|| true`). The sensor could be left chirping
 #      with the node's RECRD flag stale, and the next SETUP then timed out.
 #      A failed STOP now stops the sensor over raw serial and kills the driver.
@@ -42,11 +41,9 @@
 #      recorder then waited forever. Only lines logged after the command count.
 #   6. START answering "already started" is now a FAILURE, not "already in that
 #      state". The sensor was chirping before the DCA1000 armed, so the capture
-#      can join mid-frame -- the leading (UNCONFIRMED) suspect for the Tx-order
-#      rotations of 9 and 13 Sep.
+#      can join mid-frame
 #   7. Every take's Tx slot order is checked against a per-rig reference
-#      (scripts/tx_order_check.py). On 13 Sep 3 of 9 captures were rotated by
-#      one slot: perfect range data, silently wrong angles. A rotated take is
+#      (scripts/tx_order_check.py). A rotated take is
 #      renamed *_TXSLIP and the driver is stopped so the next take relaunches.
 # The recorder also gives up after 8 s with no frames (exit 3) instead of
 # hanging, and this script samples the wire before stopping so the dead stage
@@ -54,9 +51,7 @@
 
 set -euo pipefail
 
-# set -e exits silently: no line, no command, no clue -- which is exactly how
-# this script kept dying at "== launch" with a bare prompt. Report before
-# leaving. Every failure below is now attributable.
+# set -e exits silently: Every failure below is now attributable.
 trap 'rc=$?; echo; echo "session.sh FAILED at line $LINENO (exit $rc)" >&2; echo "  command: $BASH_COMMAND" >&2' ERR
 
 REMOTE="${REMOTE:-mmwave@192.168.33.30}"
@@ -97,10 +92,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Where captures land locally. Prefer an existing Desktop/results (there is
-# normally exactly one Windows user under /mnt/c/Users) and fall back to the
-# WSL home, so this works without configuration on this machine and does not
-# silently invent a path on another.
+# Where captures land locally and fall back to the WSL home
 if [[ -n "$DEST_ARG" ]]; then
     DEST="$DEST_ARG"
 else
@@ -183,24 +175,20 @@ svc() {  # svc <0|1|2> <label> [timeout_s]
     n0=$(log_lines)
     # timeout, because ros2 service call blocks indefinitely on a service that
     # never appears rather than failing. SETUP uploads the whole profile one
-    # serial command at a time and legitimately takes ~4 s, so allow 30.
+    # serial command at a time.
     out=$(rsrc "timeout ${3:-30} ros2 service call $SVC_NAME mmwave_drv/srv/SendDeviceControlCommand '{command: $1}'" 2>&1) || true
     if grep -q "status=True" <<<"$out"; then
         echo " ok"
         return 0
     fi
 
-    # Only what the driver logged in response to THIS command. Scanning the
-    # last 40 lines instead let a stale "Error -54" from an earlier take pass a
-    # new START failure as "already in that state", and the recorder then
-    # waited forever for a sensor that never started (13 Sep 2026).
+    # Only what the driver logged in response to THIS command.
     sleep 0.5
     new_log=$(r "tail -n +$((n0 + 1)) '$LOG'" 2>/dev/null || true)
 
     # "Error -54: Sensor has already been started or stopped" is the radar
     # saying it is ALREADY in the state we asked for. For START and STOP that
-    # is the desired end state, not a failure -- and treating it as one is how
-    # a good capture got thrown away on 29 Aug. SETUP is different: there -54
+    # is the desired end state, not a failure. SETUP is different: there -54
     # means the sensor is chirping and the CLI refused flushCfg.
     if [[ "$1" == 0 ]] && grep -q "already been started or stopped" <<<"$new_log"; then
         echo " already stopped -- continuing"
@@ -208,8 +196,7 @@ svc() {  # svc <0|1|2> <label> [timeout_s]
     fi
     # START is NOT the same. "Already started" means the sensor was chirping
     # before the DCA1000 was told to record, so the capture can join the stream
-    # mid-frame with the Tx slots rotated -- range data perfect, angles wrong.
-    # Accepting it (as this script did until 13 Sep) records exactly that.
+    # mid-frame with the Tx slots rotated.
     if [[ "$1" == 1 ]] && grep -q "already been started or stopped" <<<"$new_log"; then
         echo " FAILED -- the sensor was already chirping"
         echo "  Recording now could join the stream mid-frame and rotate the Tx order." >&2
@@ -236,8 +223,7 @@ svc() {  # svc <0|1|2> <label> [timeout_s]
 
 # Graceful STOP through the node if it is up, then kill every node, then stop
 # the sensor over serial REGARDLESS. Not gated on the STOP succeeding: a wedged
-# node is exactly when this is needed, and a failed STOP is what left the
-# sensor chirping on 13 Sep.
+# node is exactly when this is needed
 stop_driver() {
     if driver_up; then
         svc 0 STOP 10 || echo "  (graceful stop failed -- killing and stopping over serial)"
@@ -263,8 +249,7 @@ launch_driver() {
         | tail -5
 
     say "launch"
-    # stop_driver, not kill_all: kill_all alone left the sensor chirping and
-    # --restart then failed SETUP on a perfectly good radar (13 Sep 2026).
+    # stop_driver, not kill_all: kill_all alone left the sensor chirping
     stop_driver
 
     # run.sh raises net.core.rmem_max, but it does that with sudo, which cannot
@@ -286,9 +271,7 @@ launch_driver() {
     # use_client:=false is load-bearing. radar_term_cli.py arms the radar from
     # its own __init__ (sleep 3 -> SETUP, sleep 4 -> START) with no flag and no
     # prompt, so leaving it in the launch makes it a second controller racing
-    # this script. On 29 Aug its START won and ours came back "Error -54,
-    # Sensor has already been started", aborting a take whose radar was
-    # already running at 333 Hz. This script is the only client now.
+    # this script. This script is the only client now.
     echo "  starting driver ..."
     # timeout(1) execs a binary, so it cannot wrap the r() shell function --
     # it fails with "failed to execute process". Call ssh directly here.
@@ -313,8 +296,7 @@ launch_driver() {
 
 # --- Ctrl-C ---------------------------------------------------------------
 # Ctrl-C kills the LOCAL ssh only. The recorder on the Jetson has no terminal,
-# receives no signal, and waits for frames forever -- three had piled up by
-# 13 Sep, each subscribed and competing for CPU. SIGINT rather than SIGTERM so
+# receives no signal, and waits for frames forever. SIGINT rather than SIGTERM so
 # it still writes its capture summary. The sensor is stopped too: left armed,
 # it makes the next take's SETUP fail.
 on_interrupt() {
@@ -361,7 +343,7 @@ else
 fi
 
 # --- leftover recorders ---------------------------------------------------
-# One Python recorder only just keeps up at 333 Hz on this Xavier NX, so an
+# One Python recorder only just keeps up at [frame rate] on this Xavier NX, so an
 # orphan from an earlier interrupted take costs this take frames. Sweep.
 STALE=$(r "pgrep -af '[r]ecorder.py'; true" | tr -d '\r')
 if [[ -n "$STALE" ]]; then
@@ -372,7 +354,7 @@ fi
 
 # --- arm the radar --------------------------------------------------------
 # SETUP uploads the whole profile over the serial link one command at a time
-# and takes ~4 s; do not shorten the wait. Both are idempotent, so re-arming
+# and takes ~4 s. Both are idempotent, so re-arming
 # an already-armed radar is harmless.
 arm() {
     svc 2 SETUP || return 1
@@ -442,19 +424,53 @@ if (( REC_RC != 0 )); then
     exit 1
 fi
 
+# --- chirp alignment ------------------------------------------------------
+# From the samples: does the take start on an Rx-block boundary? The data node
+# aligns on the DCA1000's byte count, which cannot see bytes the card never
+# counted. See chirp_align_check.py.
+if [[ -n "$CAPDIR" ]]; then
+    say "chirp alignment"
+    CA_RC=0
+    rsrc "python3 scripts/chirp_align_check.py '$CAPDIR' --write-meta" 2>&1 | sed 's/^/  /' || CA_RC=$?
+    case "$CA_RC" in
+        0) ;;
+        4)
+            echo "  ************************************************************" >&2
+            echo "  TAKE DOES NOT START ON A CHIRP BOUNDARY. Its angles are wrong" >&2
+            echo "  as recorded (the realign offset is in meta.json chirp_align)." >&2
+            echo "  Re-take it; if this was the first take since power-up, that" >&2
+            echo "  is the known 282 Hz mode -- the next take is normally clean." >&2
+            if (( REFERENCE )); then echo "  Do NOT keep it as the Tx-order reference: record it again." >&2; fi
+            echo "  ************************************************************" >&2
+            ;;
+        5) echo "  UNSURE: no clear chirp boundary in the samples (empty or saturated scene?)." >&2 ;;
+        *) echo "  chirp alignment check could not run (exit $CA_RC) -- NOT checked." >&2 ;;
+    esac
+fi
+
 # --- Tx slot order --------------------------------------------------------
-# The rotation of 9 and 13 Sep is invisible in range data and fatal to angles,
-# and nothing upstream can see it, so every take is compared with a reference
-# of the same rig. RELATIVE check only: see the tx_order_check.py docstring.
+# RELATIVE check only: see the tx_order_check.py docstring.
 REF_FILE="$CAPTURES/.txorder_ref"
 if [[ -z "$CAPDIR" ]]; then
     echo "  WARNING: could not find the capture directory in the recorder output; Tx order NOT checked." >&2
 elif (( REFERENCE )); then
     say "Tx-order reference"
-    r "echo '$CAPDIR' > '$REF_FILE'"
-    echo "  $CAPDIR"
-    echo "  is now the reference for this rig. It must be an EMPTY scene, and it is"
-    echo "  valid only until the radar is moved or re-tilted -- then record a new one."
+    # A misaligned reference silently disables the check for every later take:
+    # Accept a reference only if the samples are aligned AND no frame start was
+    # timed off the frame grid.
+    SLIPS=$(r "python3 -c 'import json,sys; c=json.load(open(sys.argv[1])).get(\"capture\",{}); print(c.get(\"burst_slips\") or 0)' '$CAPDIR/meta.json'" | tr -d '\r' || echo "?")
+    if [[ "$CA_RC" != 0 || "$SLIPS" != 0 ]]; then
+        echo "  ************************************************************" >&2
+        echo "  NOT accepted as the reference (chirp alignment exit $CA_RC," >&2
+        echo "  burst_slips $SLIPS). The previous reference, if any, is kept." >&2
+        echo "  Record the reference again:  session.sh --reference" >&2
+        echo "  ************************************************************" >&2
+    else
+        r "echo '$CAPDIR' > '$REF_FILE'"
+        echo "  $CAPDIR"
+        echo "  is now the reference for this rig. It must be an EMPTY scene, and it is"
+        echo "  valid only until the radar is moved or re-tilted -- then record a new one."
+    fi
 else
     say "Tx-order check"
     REF=$(r "cat '$REF_FILE' 2>/dev/null; true" | tr -d '\r')
