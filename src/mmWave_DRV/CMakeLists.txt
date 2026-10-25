@@ -41,16 +41,11 @@ include_directories(
 	${std_msgs_INCLUDE_DIRS}
 	${CMAKE_CURRENT_BINARY_DIR}/$<BUILD_INTERFACE:${PROJECT_NAME}>/msg
 )
-# Add ringbuffer as a library
-#add_library(ringbuffer src/cpp/ringbuffer.cpp)
-
-# Add C++ executables
-add_executable(radar_data 
+# Add C++ executables. The inherited RingBuffer class was compiled in and
+# instantiated but never used; the node keeps its own aligned ring.
+add_executable(radar_data
   src/cpp/radar_data_node.cpp
-  src/cpp/ringbuffer.cpp
   )
-
-#target_link_libraries(radar_data ringbuffer)
 
 ament_target_dependencies(radar_data rclcpp builtin_interfaces rosidl_default_runtime ament_index_cpp)
 

@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """
-Subscribe to /radar_data and write raw frames to disk.
+Record /radar_data to a capture folder: frames.bin (raw frames), index.csv (one row per frame)
+and meta.json (profile, dimensions and, on exit, the capture summary).
 
-Writes three files into the session directory:
-    frames.bin   - raw frame payloads, concatenated, no padding
-    index.csv    - one row per frame: seq, ros_stamp_ns, wall_time_s, byte_offset
-    meta.json    - radar config snapshot + derived dimensions
-
-Run AFTER sourcing the workspace, e.g.
-    python3 recorder.py --name handwave_01
+    python3 recorder.py --name handwave_01 [--max-frames N]      # after sourcing the workspace
 """
 
 import argparse
@@ -28,21 +23,22 @@ try:
 except ImportError:
     sys.exit("Cannot import mmwave_drv.msg.Frame -- source install/setup.bash first.")
 
+NOT_TIMED = -2147483648   # burst_phase value for a frame start the data node could not time
+
 
 def count_bits(mask):
     return bin(int(mask)).count("1")
 
 
 def derive_dims(cfg):
-    """Mirror the frame-size arithmetic in radar_data_node.cpp (lines 129-136)."""
-    prof = cfg["profileCfg"]
-    frm = cfg["frameCfg"]
-    n_loops = int(frm["numChirps"])
-    n_samples = int(prof["numAdcSamples"])
+    """Frame dimensions from the profile, with the same arithmetic as radar_data_node.cpp."""
+    profile = cfg["profileCfg"]
+    frame = cfg["frameCfg"]
+    n_loops = int(frame["numChirps"])
+    n_samples = int(profile["numAdcSamples"])
     n_rx = count_bits(cfg["channelCfg"]["rxChannelEn"])
-    n_tx = int(frm["chirpEndIndex"]) - int(frm["chirpStartIndex"]) + 1
-    # adcOutputFmt: 0 = complex -> 2 components, 1 = real -> 1
-    iq = (int(cfg["adcbufCfg"]["adcOutputFmt"]) + 2) % 3
+    n_tx = int(frame["chirpEndIndex"]) - int(frame["chirpStartIndex"]) + 1
+    iq = (int(cfg["adcbufCfg"]["adcOutputFmt"]) + 2) % 3     # adcOutputFmt 0 complex -> 2, 1 real -> 1
     bytes_per_sample = 2
     frame_bytes = n_loops * n_samples * bytes_per_sample * iq * n_rx * n_tx
     return {
@@ -58,23 +54,22 @@ def derive_dims(cfg):
 
 
 class Recorder(Node):
-    def __init__(self, session_dir, cfg, dims, max_frames, no_frames_timeout):
+    def __init__(self, capture_dir, cfg, dims, max_frames, no_frames_timeout):
         super().__init__("radar_recorder")
-        self.session_dir = session_dir
+        self.capture_dir = capture_dir
         self.dims = dims
         self.max_frames = max_frames
         self.no_frames_timeout = no_frames_timeout
         self.t_start = time.time()
         self.exit_code = 0
 
-        self.bin_f = open(os.path.join(session_dir, "frames.bin"), "wb")
-        self.idx_f = open(os.path.join(session_dir, "index.csv"), "w")
+        self.bin_f = open(os.path.join(capture_dir, "frames.bin"), "wb")
+        self.idx_f = open(os.path.join(capture_dir, "index.csv"), "w")
         self.idx_f.write("seq,ros_stamp_ns,wall_time_s,byte_offset,byte_len,stream_offset,burst_phase\n")
 
-        # Alignment, from the stream_offset the data node stamps on every frame
-        # (DCA1000 byte count of the frame's first byte). Aligned frames sit at
-        # multiples of frame_bytes; consecutive frames differ by exactly one
-        # frame_bytes unless frames were dropped in the node.
+        # The data node stamps every frame with its stream offset, the DCA1000 byte count of the
+        # frame's first byte. Aligned frames sit at multiples of frame_bytes, and consecutive
+        # frames differ by exactly one frame_bytes unless the node dropped frames.
         self.first_stream_offset = None
         self.last_stream_offset = None
         self.join_offset = None
@@ -83,9 +78,8 @@ class Recorder(Node):
         self.stream_gaps = 0
         self.stream_frames_skipped = 0
         self.stream_restarts = 0
-        # Frame starts timed by the data node from the idle gap between packet
-        # bursts (burst_phase, bytes; INT32_MIN = not timed). A slipped take
-        # shows phases near a multiple of the chirp size instead of near 0.
+        # The node also times each frame start from the idle gap between packet bursts
+        # (burst_phase, bytes). A slipped take shows phases near a multiple of the chirp size.
         self.burst_phases = []
         self.burst_warned = False
         self.chirp_bytes = dims["n_samples"] * dims["bytes_per_sample"] * dims["iq"] * dims["n_rx"]
@@ -101,10 +95,9 @@ class Recorder(Node):
         self.payload_kind = None
         self.t0 = None
 
-        # Must match the publisher QoS in radar_data_node.cpp. Both sides were
-        # default-reliable, which throttled the whole chain to the speed of this
-        # Python callback and hid the shortfall (no sequence gaps, just a lower
-        # frame rate). Best-effort surfaces any shortfall as gaps instead.
+        # Must match the publisher QoS in radar_data_node.cpp. A reliable pair throttles the
+        # whole chain to this callback's speed and shows the shortfall only as a lower frame
+        # rate. Best effort shows it as sequence gaps instead.
         qos = QoSProfile(
             depth=100,
             history=HistoryPolicy.KEEP_LAST,
@@ -112,12 +105,11 @@ class Recorder(Node):
         )
         self.sub = self.create_subscription(Frame, "radar_data", self.on_frame, qos)
         self.get_logger().info(
-            "Recording to %s (expecting %d B/frame)" % (session_dir, dims["frame_bytes"])
+            "Recording to %s (expecting %d B/frame)" % (capture_dir, dims["frame_bytes"])
         )
 
-        # Without this the recorder waits forever when nothing is publishing,
-        # and a dead stream looks exactly like a slow one. On 13 Sep that hang
-        # was Ctrl-C'd three times over ssh, orphaning a recorder each time.
+        # Without a timeout the recorder waits forever when nothing is publishing, and a dead
+        # stream looks exactly like a slow one.
         self.watchdog = None
         if no_frames_timeout > 0:
             self.watchdog = self.create_timer(1.0, self.check_stream)
@@ -128,8 +120,7 @@ class Recorder(Node):
             return
         if time.time() - self.t_start > self.no_frames_timeout:
             self.get_logger().error(
-                "NO FRAMES after %.0f s -- nothing is publishing on radar_data. "
-                "The sensor is not streaming, or the data node is not publishing."
+                "No frames after %.0f s on radar_data: the sensor or the data node is not streaming."
                 % self.no_frames_timeout
             )
             self.exit_code = 3
@@ -140,53 +131,42 @@ class Recorder(Node):
         if self.t0 is None:
             self.t0 = now
 
-        # Which branch runs here is the whole ballgame. Frame.msg declares
-        # uint8[], which rclpy deserialises as a numpy array -- one memcpy. It
-        # was byte[] (an IDL octet sequence), which is excluded from the numpy
-        # fast path and arrives as ~24k single-byte objects to be joined, at
-        # roughly 5-6 ms/frame on this Xavier NX. That capped the recorder at
-        # 169.5 Hz against a publisher running a rock-steady 333.33 Hz.
-        # The branch taken is logged once so a silent regression is visible.
-        fd = msg.frame_data
-        if isinstance(fd, (bytes, bytearray)):
-            data = bytes(fd)
+        # Frame.msg declares uint8[], which rclpy delivers as a numpy array (one copy). A byte[]
+        # field arrives as a list of single-byte objects, slow enough to halve the recorded
+        # rate, so the branch taken is logged once.
+        payload = msg.frame_data
+        if isinstance(payload, (bytes, bytearray)):
+            data = bytes(payload)
             kind = "bytes"
-        elif hasattr(fd, "tobytes"):        # numpy array or array.array
-            data = fd.tobytes()
+        elif hasattr(payload, "tobytes"):        # numpy array or array.array
+            data = payload.tobytes()
             kind = "numpy/array (fast)"
-        else:                                # list of length-1 bytes objects
-            data = b"".join(fd)
-            kind = "python list (SLOW -- is Frame.msg still byte[]?)"
+        else:                                    # list of length-1 bytes objects
+            data = b"".join(payload)
+            kind = "python list (slow: is Frame.msg still byte[]?)"
         if self.payload_kind is None:
             self.payload_kind = kind
             self.get_logger().info("frame_data arrives as: %s" % kind)
-        n = len(data)
+        n_bytes = len(data)
 
-        if n != self.dims["frame_bytes"]:
+        if n_bytes != self.dims["frame_bytes"]:
             self.size_mismatch += 1
             if self.size_mismatch == 1:
                 self.get_logger().warn(
-                    "Frame size %d does not match config-derived %d. "
-                    "The config on disk may differ from the one the driver loaded."
-                    % (n, self.dims["frame_bytes"])
+                    "Frame is %d B but the profile gives %d B: did the driver load another profile?"
+                    % (n_bytes, self.dims["frame_bytes"])
                 )
 
-        # header.frame_id carries the driver's incrementing counter.
-        #
-        # The old fallback here was `seq = self.count` on a parse failure, which
-        # is the recorder's OWN callback counter: it increments by exactly 1
-        # every callback, so gap detection silently degraded into "count my own
-        # callbacks" and could never report a gap. Capture 2026-08-26_17-09-53
-        # reported sequence_gaps=0 while dropping 2416 of 4916 published frames.
-        # A parse failure is now counted and reported, never papered over.
+        # header.frame_id carries the driver's frame counter. A parse failure is counted and
+        # reported rather than replaced by the recorder's own count, which could never show a gap.
         try:
             seq = int(msg.header.frame_id)
         except (TypeError, ValueError):
             self.seq_unparsed += 1
             if self.seq_unparsed == 1:
                 self.get_logger().error(
-                    "header.frame_id %r is not an integer -- LOSS DETECTION IS "
-                    "DISABLED for this capture." % (msg.header.frame_id,)
+                    "header.frame_id %r is not an integer: dropped frames cannot be counted."
+                    % (msg.header.frame_id,)
                 )
             seq = None
 
@@ -200,38 +180,41 @@ class Recorder(Node):
                     self.get_logger().warn("Sequence gap: %s -> %s" % (self.last_seq, seq))
             self.last_seq = seq
 
-        so = getattr(msg, "stream_offset", None)
-        if so is not None:
-            fb = self.dims["frame_bytes"]
-            if so % fb != 0:
+        stream_offset = getattr(msg, "stream_offset", None)
+        if stream_offset is not None:
+            frame_bytes = self.dims["frame_bytes"]
+            if stream_offset % frame_bytes != 0:
                 self.misaligned += 1
                 if self.misaligned == 1:
-                    self.get_logger().error("Frame at stream offset %d is NOT on a frame boundary." % so)
+                    self.get_logger().error("Frame at stream offset %d is off the frame boundary." % stream_offset)
             if self.last_stream_offset is None:
-                self.first_stream_offset = so
-            elif so < self.last_stream_offset:
+                self.first_stream_offset = stream_offset
+            elif stream_offset < self.last_stream_offset:
                 self.stream_restarts += 1
-                self.get_logger().error("Stream restarted mid-take (offset %d -> %d)." % (self.last_stream_offset, so))
-            elif so != self.last_stream_offset + fb:
+                self.get_logger().error("Stream restarted mid-take (offset %d -> %d)."
+                                        % (self.last_stream_offset, stream_offset))
+            elif stream_offset != self.last_stream_offset + frame_bytes:
                 self.stream_gaps += 1
-                self.stream_frames_skipped += (so - self.last_stream_offset) // fb - 1
-            self.last_stream_offset = so
+                self.stream_frames_skipped += (stream_offset - self.last_stream_offset) // frame_bytes - 1
+            self.last_stream_offset = stream_offset
             self.join_offset = msg.join_offset
             self.zero_filled = msg.zero_filled
-        bp = getattr(msg, "burst_phase", None)
-        if bp is not None and bp != -2147483648:
-            self.burst_phases.append(bp)
-            if abs(bp) * 2 >= self.chirp_bytes and not self.burst_warned:
+        burst_phase = getattr(msg, "burst_phase", None)
+        timed = burst_phase is not None and burst_phase != NOT_TIMED
+        if timed:
+            self.burst_phases.append(burst_phase)
+            if abs(burst_phase) * 2 >= self.chirp_bytes and not self.burst_warned:
                 self.burst_warned = True
                 self.get_logger().error("Frame start %d B (%.2f chirps) off the frame grid: "
-                                        "Tx slot order NOT trustworthy." % (bp, bp / self.chirp_bytes))
+                                        "Tx slot order unreliable."
+                                        % (burst_phase, burst_phase / self.chirp_bytes))
 
         stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
         self.bin_f.write(data)
-        self.idx_f.write("%d,%d,%.6f,%d,%d,%s,%s\n" % (seq, stamp_ns, now, self.offset, n,
-                                                      "" if so is None else so,
-                                                      "" if bp is None or bp == -2147483648 else bp))
-        self.offset += n
+        self.idx_f.write("%d,%d,%.6f,%d,%d,%s,%s\n" % (seq, stamp_ns, now, self.offset, n_bytes,
+                                                      "" if stream_offset is None else stream_offset,
+                                                      burst_phase if timed else ""))
+        self.offset += n_bytes
         self.count += 1
 
         if self.count % 100 == 0:
@@ -246,21 +229,21 @@ class Recorder(Node):
             raise SystemExit(0)
 
     def burst_summary(self):
-        """Frame-start timing check. burst_slips counts frame starts more than half
-        a chirp off the frame grid; on an aligned take it is 0 and burst_phase_min/max
-        sit between minus one packet (-1456) and 0."""
+        """Frame-start timing check. burst_slips counts frame starts more than half a chirp off
+        the frame grid. On an aligned take it is 0 and burst_phase_min/max sit between minus one
+        packet (-1456) and 0."""
         chirp = self.chirp_bytes
-        p = sorted(self.burst_phases)
-        if not p:
+        phases = sorted(self.burst_phases)
+        if not phases:
             return {"burst_timed_frames": 0, "burst_slips": None}
-        slips = sum(1 for v in p if abs(v) * 2 >= chirp)
+        slips = sum(1 for v in phases if abs(v) * 2 >= chirp)
         return {
-            "burst_timed_frames": len(p),
-            "burst_timed_fraction": round(len(p) / self.count, 3) if self.count else None,
-            "burst_phase_min": p[0],
-            "burst_phase_median": p[len(p) // 2],
-            "burst_phase_max": p[-1],
-            "burst_phase_chirps": round(p[len(p) // 2] / chirp, 2),
+            "burst_timed_frames": len(phases),
+            "burst_timed_fraction": round(len(phases) / self.count, 3) if self.count else None,
+            "burst_phase_min": phases[0],
+            "burst_phase_median": phases[len(phases) // 2],
+            "burst_phase_max": phases[-1],
+            "burst_phase_chirps": round(phases[len(phases) // 2] / chirp, 2),
             "burst_slips": slips,
         }
 
@@ -269,10 +252,8 @@ class Recorder(Node):
         self.idx_f.close()
         elapsed = (time.time() - self.t0) if self.t0 else 0
         rate = self.count / elapsed if elapsed > 0 else 0
-        # seq_span is the publisher's own frame count over the same window, so
-        # frames/seq_span is the fraction actually captured. Without it a slow
-        # subscriber looks identical to a slow radar -- which is exactly how the
-        # publisher's true 333 Hz went unnoticed while this reported ~160 Hz.
+        # seq_span is the publisher's own frame count over the same window, so frames / seq_span
+        # is the fraction captured. A rate alone cannot tell a slow subscriber from a slow radar.
         span = None
         if self.first_seq is not None and self.last_seq is not None:
             span = self.last_seq - self.first_seq + 1
@@ -289,9 +270,8 @@ class Recorder(Node):
             "seq_unparsed": self.seq_unparsed,
             "payload_kind": self.payload_kind,
             "size_mismatches": self.size_mismatch,
-            # Frame alignment (data node stream offsets). aligned = every frame
-            # on a frame boundary of the DCA1000 stream; join_offset 0 = the node
-            # saw this stream from its first byte.
+            # aligned: every frame on a frame boundary of the DCA1000 stream.
+            # join_offset 0: the node saw this stream from its first byte.
             "aligned": (self.misaligned == 0) if self.first_stream_offset is not None else None,
             "first_stream_offset": self.first_stream_offset,
             "join_offset": self.join_offset,
@@ -301,7 +281,7 @@ class Recorder(Node):
             "stream_restarts": self.stream_restarts,
         }
         summary.update(self.burst_summary())
-        path = os.path.join(self.session_dir, "meta.json")
+        path = os.path.join(self.capture_dir, "meta.json")
         with open(path) as f:
             meta = json.load(f)
         meta["capture"] = summary
@@ -310,36 +290,33 @@ class Recorder(Node):
         print("\n--- capture summary ---")
         for k, v in summary.items():
             print("  %-18s %s" % (k, v))
-        print("  written to        %s" % self.session_dir)
+        print("  written to        %s" % self.capture_dir)
 
-        # An empty capture directory is worse than none: the pull copies it and
-        # it sorts as the "latest" take under that name.
+        # An empty capture directory would be pulled and sort as the latest take under its name.
         if self.count == 0:
-            shutil.rmtree(self.session_dir, ignore_errors=True)
+            shutil.rmtree(self.capture_dir, ignore_errors=True)
             print("  no frames -- removed the empty capture directory")
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--name", default=None, help="session name (default: timestamp)")
-    ap.add_argument("--out", default=os.path.expanduser("~/ssd/captures"))
-    # Derived from this file's location, not hardcoded: recorder.py lives in
-    # <ws>/scripts/, so the config sits at <ws>/src/mmWave_DRV/config/. A
-    # hardcoded absolute path here broke silently when the tree was moved.
-    ap.add_argument(
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--name", default=None, help="capture name (default: timestamp)")
+    parser.add_argument("--out", default=os.path.expanduser("~/ssd/captures"))
+    # The default profile is found relative to this file (<ws>/scripts/recorder.py), so it
+    # follows the workspace if the tree moves.
+    parser.add_argument(
         "--config",
         default=os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "src", "mmWave_DRV", "config", "awr1843_launchmonitor.json",
         ),
     )
-    ap.add_argument("--note", default="", help="free-text description of the capture")
-    ap.add_argument("--max-frames", type=int, default=0, help="0 = until Ctrl+C")
-    # 8 s, not 2: Foxy's DDS discovery takes a second or two to match the
-    # publisher, and a false timeout would cost a good take.
-    ap.add_argument("--no-frames-timeout", type=float, default=8.0,
-                    help="exit 3 if no frame arrives within this many seconds (0 = wait forever)")
-    args = ap.parse_args()
+    parser.add_argument("--note", default="", help="free-text description of the capture")
+    parser.add_argument("--max-frames", type=int, default=0, help="0 = until Ctrl+C")
+    # 8 s because DDS discovery takes a second or two to match the publisher.
+    parser.add_argument("--no-frames-timeout", type=float, default=8.0,
+                        help="exit 3 if no frame arrives within this many seconds (0 = wait forever)")
+    args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = json.load(f)
@@ -347,10 +324,10 @@ def main():
 
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     name = "%s_%s" % (stamp, args.name) if args.name else stamp
-    session_dir = os.path.join(args.out, name)
-    os.makedirs(session_dir, exist_ok=False)
+    capture_dir = os.path.join(args.out, name)
+    os.makedirs(capture_dir, exist_ok=False)
 
-    with open(os.path.join(session_dir, "meta.json"), "w") as f:
+    with open(os.path.join(capture_dir, "meta.json"), "w") as f:
         json.dump(
             {
                 "session": name,
@@ -365,7 +342,7 @@ def main():
         )
 
     rclpy.init()
-    node = Recorder(session_dir, cfg, dims, args.max_frames, args.no_frames_timeout)
+    node = Recorder(capture_dir, cfg, dims, args.max_frames, args.no_frames_timeout)
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, SystemExit):
@@ -375,8 +352,7 @@ def main():
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-    # Non-zero on the no-frames timeout, so session.sh can tell a dead stream
-    # from a finished take instead of pulling nothing and calling it done.
+    # Non-zero on the no-frames timeout, so session.sh can tell a dead stream from a finished take.
     sys.exit(node.exit_code)
 
 

@@ -4,32 +4,27 @@
 #   scripts/monitor.sh [seconds]        default 10
 #   IFACE=enp1s0 scripts/monitor.sh 20  override the capture interface
 #
-# The wire-rate figure is the important one: it is read from /proc/net/dev and
-# is therefore independent of ROS2, DDS, QoS and Python. It reports what the
-# DCA1000 is actually delivering, which is the only way to tell a device/config
-# problem from a downstream backpressure problem.
+# The wire rate is read from /proc/net/dev, so it does not depend on ROS2, DDS,
+# QoS or Python. It is what the DCA1000 actually delivers, which separates a
+# device or config problem from a downstream one.
 
-# Derived from this script's location -- see the note in run.sh.
+# Workspace root, from this script's location.
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source /opt/ros/foxy/setup.bash
 source "$WS/install/setup.bash"
 
 DUR=${1:-10}
 
-# The capture NIC is whichever interface holds the DCA1000 host address -- not
-# necessarily eth0. Pointing this at the wrong interface reports a confident
-# 0.00 MB/s while the radar is streaming perfectly, which reads as a dead radar
-# and sends you hunting a fault that is not there (seen 29 Aug 2026).
+# The capture interface is whichever one holds the DCA1000 host address, not
+# necessarily eth0. The wrong interface reports 0.00 MB/s while the radar streams.
 DCA_SUBNET=${DCA_SUBNET:-192.168.33.}
 if [ -z "${IFACE:-}" ]; then
     IFACE=$(ip -o -4 addr show 2>/dev/null             | awk -v s="$DCA_SUBNET" '$4 ~ "^" s {print $2; exit}')
     [ -n "$IFACE" ] && echo "auto-detected capture interface: $IFACE ($DCA_SUBNET*)"
 fi
 IFACE=${IFACE:-eth0}
-# Read the profile path from radar_config.yaml -- the same file the launch
-# feeds the driver -- rather than hardcoding one. A hardcoded profile here goes
-# quietly stale the moment the driver is pointed at a different one, and then
-# every figure below is computed against a frame size the radar is not sending.
+# The profile comes from radar_config.yaml, the same file the launch gives the
+# driver, so the figures below use the frame size the radar is actually sending.
 CFG=${CFG:-$(python3 -c "
 import yaml
 try:
@@ -47,8 +42,7 @@ if ! grep -q "^ *$IFACE:" /proc/net/dev; then
     exit 1
 fi
 
-# Frame size straight from the config the driver loads, so this cannot drift
-# out of step with the profile: loops * tx * rx * samples * 4 bytes (complex 16-bit).
+# Frame size from that profile: loops * tx * rx * samples * 4 bytes (complex 16-bit).
 FRAME_BYTES=$(python3 -c "
 import json
 c = json.load(open('$CFG'))
@@ -74,8 +68,6 @@ echo "$A $B $DUR $FRAME_BYTES $PERIOD_MS" | awk '{
     printf "  implied rate  %.1f frames/s  (configured %.1f Hz, %.0f%%)\n", fps, want, fps/want*100
 }'
 
-# NOTE: ros2 topic hz/bw use RELIABLE QoS and Foxy gives them no --qos-reliability
-# flag, so they will NOT connect to the best-effort publisher in radar_data_node.
-# They are left here only as a liveness check. For the publisher-side rate, use
-# the periodic "Published N frames" lines in logs/launch_*.log instead.
-echo "(ros2 topic hz omitted: reliable-only in Foxy, incompatible with best-effort publisher)"
+# ros2 topic hz/bw use reliable QoS, and Foxy gives them no flag to change it, so
+# they cannot connect to the best-effort publisher. For the publisher-side rate,
+# use the "Published N frames" lines in logs/launch_*.log.

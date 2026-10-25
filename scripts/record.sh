@@ -8,7 +8,7 @@
 
 set -e
 
-# Derived from this script's location -- see the note in run.sh.
+# Workspace root, from this script's location.
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NAME=${1:?usage: record.sh <session-name> [note] [extra args...]}
 NOTE=${2:-}
@@ -19,12 +19,9 @@ source "$WS/install/setup.bash"
 
 mkdir -p ~/ssd/captures
 
-# Take the profile from radar_config.yaml -- the same file the launch feeds the
-# driver -- rather than naming one here. A hardcoded profile goes stale the
-# moment the driver is pointed elsewhere, and the recorder then computes its
-# expected frame size from a profile the radar is not running. That surfaces
-# only as `size_mismatches` in the summary, which is easy to miss.
-# Override deliberately with CFG=/path/to/profile.json.
+# The profile comes from radar_config.yaml, the same file the launch gives the
+# driver, so the recorder expects the frame size the radar is actually sending.
+# Override with CFG=/path/to/profile.json.
 CFG=${CFG:-$(python3 -c "
 import yaml
 try:
