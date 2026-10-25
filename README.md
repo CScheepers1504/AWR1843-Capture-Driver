@@ -7,7 +7,7 @@ While it can be used for general use cases, this repository is one of two used f
 [FMCW-Radar-Launch-Monitor](https://github.com/CScheepers1504/FMCW-Radar-Launch-Monitor).
 
 The driver utilises a ROS 2 driver in `src/mmWave_DRV`, which was inherited (Haug, University of Cape Town), kept with its
-git history, but altered and hardened for this project. Its own README describes the driver as inherited.
+git history, but altered and improved for this project. Its own README describes the driver as inherited.
 
 ## One take
 
